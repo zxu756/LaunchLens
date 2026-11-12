@@ -20,10 +20,10 @@ public enum ServiceDomain: String, CaseIterable, Codable, Identifiable, Sendable
 
     public var color: Color {
         switch self {
-        case .userAgent: return Color(red: 0.22, green: 0.74, blue: 0.97)     // Cyan
-        case .orphanDaemon: return Color(red: 0.98, green: 0.56, blue: 0.24)  // Amber-Orange
-        case .globalAgent: return Color(red: 0.66, green: 0.55, blue: 0.98)   // Violet
-        case .systemDaemon: return Color(red: 0.48, green: 0.54, blue: 0.65)  // Slate
+        case .userAgent: return Color(red: 0.118, green: 0.337, blue: 0.627)     // Deep Cryo Cobalt #1E56A0
+        case .orphanDaemon: return Color(red: 0.761, green: 0.255, blue: 0.114)  // Alert Terracotta #C2411D
+        case .globalAgent: return Color(red: 0.392, green: 0.263, blue: 0.608)   // Mineral Plum #64439B
+        case .systemDaemon: return Color(red: 0.333, green: 0.369, blue: 0.420)  // Graphite Slate #555E6B
         }
     }
 

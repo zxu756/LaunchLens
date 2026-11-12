@@ -280,8 +280,8 @@ public enum ScreenshotExporter {
         let monitor = LaunchLensMonitor.preview()
 
         let mainView = MainDashboardView(monitor: monitor)
-            .frame(width: 980, height: 710)
-            .environment(\.colorScheme, .dark)
+            .frame(width: 980, height: 730)
+            .environment(\.colorScheme, .light)
 
         try renderPNG(view: mainView, to: directory.appendingPathComponent("screenshot-main.png"))
 
@@ -290,8 +290,10 @@ public enum ScreenshotExporter {
             onOpenDashboard: {},
             onQuit: {}
         )
-        .frame(width: 380, height: 490)
-        .environment(\.colorScheme, .dark)
+        .frame(width: 380, height: 422)
+        .padding(14)
+        .background(Color(red: 0.925, green: 0.918, blue: 0.890))
+        .environment(\.colorScheme, .light)
 
         try renderPNG(view: popoverView, to: directory.appendingPathComponent("screenshot-menubar.png"))
     }

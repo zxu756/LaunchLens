@@ -38,7 +38,7 @@ struct LaunchLensApp: App {
         Window("LaunchLens", id: "main") {
             MainDashboardView(monitor: monitor)
         }
-        .defaultSize(width: 980, height: 710)
+        .defaultSize(width: 980, height: 730)
 
         MenuBarExtra {
             MenuBarPopoverView(
@@ -51,7 +51,7 @@ struct LaunchLensApp: App {
                     NSApplication.shared.terminate(nil)
                 }
             )
-            .frame(width: 380, height: 490)
+            .frame(width: 380, height: 422)
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "snowflake.circle")
