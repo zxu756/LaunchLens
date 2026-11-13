@@ -26,6 +26,42 @@ public enum FreezeError: LocalizedError, Equatable {
             return "No frozen snapshot found with id '\(id)'."
         }
     }
+
+    @MainActor
+    public func localizedMessage(_ localizer: AppLocalizer) -> String {
+        switch self {
+        case .unsupportedDomain(let dom):
+            return localizer.L(
+                "Only User LaunchAgents can be frozen without root privileges (got \(dom)).",
+                "无需 root 权限仅可冻结用户级 LaunchAgents（当前为 \(dom)）。"
+            )
+        case .appleSystemProtected(let label):
+            return localizer.L(
+                "Apple system service '\(label)' is protected and cannot be frozen.",
+                "Apple 系统服务「\(label)」受系统保护，不可冻结。"
+            )
+        case .missingPlistPath:
+            return localizer.L(
+                "Item has no backing .plist path.",
+                "该服务缺少关联的 .plist 配置文件路径。"
+            )
+        case .plistNotFound(let path):
+            return localizer.L(
+                "LaunchAgent plist does not exist at \(path).",
+                "未找到 LaunchAgent 配置文件：\(path)。"
+            )
+        case .snapshotCorrupted(let label):
+            return localizer.L(
+                "Snapshot SHA-256 verification failed for '\(label)'; aborting restore.",
+                "「\(label)」快照 SHA-256 完整性校验失败，已中止恢复。"
+            )
+        case .recordNotFound(let id):
+            return localizer.L(
+                "No frozen snapshot found with id '\(id)'.",
+                "未找到 ID 为「\(id)」的冻结快照记录。"
+            )
+        }
+    }
 }
 
 public final class FreezeLedgerStore: @unchecked Sendable {

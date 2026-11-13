@@ -1,29 +1,32 @@
 import SwiftUI
 
-enum LedgerTheme {
+public enum LedgerTheme {
     // Studio Alabaster & Cryo-Cobalt Light Precision Palette
-    static let canvas = Color(red: 0.965, green: 0.961, blue: 0.945)     // #F6F5F1 warm studio alabaster
-    static let sheet = Color(red: 1.000, green: 1.000, blue: 1.000)      // #FFFFFF pure elevated ledger sheet
-    static let well = Color(red: 0.925, green: 0.918, blue: 0.890)       // #ECEAE3 recessed control & bar well
-    static let tinted = Color(red: 0.949, green: 0.945, blue: 0.925)     // #F2F1EC subtle table header band
-    static let hairline = Color(red: 0.859, green: 0.847, blue: 0.808)   // #DBD8CE crisp structural hairline
-    static let rowRule = Color(red: 0.918, green: 0.910, blue: 0.882)    // #EAE8E1 subtle row separator
+    public static let canvas = Color(red: 0.965, green: 0.961, blue: 0.945)     // #F6F5F1 warm studio alabaster
+    public static let sheet = Color(red: 1.000, green: 1.000, blue: 1.000)      // #FFFFFF pure elevated ledger sheet
+    public static let well = Color(red: 0.925, green: 0.918, blue: 0.890)       // #ECEAE3 recessed control & bar well
+    public static let tinted = Color(red: 0.949, green: 0.945, blue: 0.925)     // #F2F1EC subtle table header band
+    public static let hairline = Color(red: 0.859, green: 0.847, blue: 0.808)   // #DBD8CE crisp structural hairline
+    public static let rowRule = Color(red: 0.918, green: 0.910, blue: 0.882)    // #EAE8E1 subtle row separator
 
-    static let ink = Color(red: 0.094, green: 0.090, blue: 0.082)        // #181715 deep obsidian ink
-    static let muted = Color(red: 0.396, green: 0.376, blue: 0.345)      // #656058 secondary graphite
-    static let subtle = Color(red: 0.545, green: 0.522, blue: 0.482)     // #8B857B tertiary metadata
+    public static let ink = Color(red: 0.094, green: 0.090, blue: 0.082)        // #181715 deep obsidian ink
+    public static let muted = Color(red: 0.396, green: 0.376, blue: 0.345)      // #656058 secondary graphite
+    public static let subtle = Color(red: 0.545, green: 0.522, blue: 0.482)     // #8B857B tertiary metadata
 
-    static let cobalt = Color(red: 0.118, green: 0.337, blue: 0.627)     // #1E56A0 cryo snapshot & user agent
-    static let terracotta = Color(red: 0.761, green: 0.255, blue: 0.114) // #C2411D orphan alert & high RSS
-    static let forest = Color(red: 0.098, green: 0.447, blue: 0.306)     // #19724E active daemon & TCP port
-    static let plum = Color(red: 0.392, green: 0.263, blue: 0.608)       // #64439B global agent
+    public static let cobalt = Color(red: 0.118, green: 0.337, blue: 0.627)     // #1E56A0 cryo snapshot & user agent
+    public static let terracotta = Color(red: 0.761, green: 0.255, blue: 0.114) // #C2411D orphan alert & high RSS
+    public static let forest = Color(red: 0.098, green: 0.447, blue: 0.306)     // #19724E active daemon & TCP port
+    public static let plum = Color(red: 0.392, green: 0.263, blue: 0.608)       // #64439B global agent
 }
 
 public struct MainDashboardView: View {
     @ObservedObject var monitor: LaunchLensMonitor
+    @ObservedObject var localizer: AppLocalizer
 
-    public init(monitor: LaunchLensMonitor) {
+    @MainActor
+    public init(monitor: LaunchLensMonitor, localizer: AppLocalizer? = nil) {
         self.monitor = monitor
+        self.localizer = localizer ?? .shared
     }
 
     public var body: some View {
@@ -44,6 +47,7 @@ public struct MainDashboardView: View {
         }
         .background(LedgerTheme.canvas)
         .foregroundStyle(LedgerTheme.ink)
+        .environment(\.locale, localizer.language.locale)
         .preferredColorScheme(.light)
     }
 
@@ -65,18 +69,25 @@ public struct MainDashboardView: View {
                     .font(.system(size: 17, weight: .bold))
                     .tracking(-0.35)
                     .foregroundStyle(LedgerTheme.ink)
-                Text("Persistent LaunchAgents, orphan daemons & SHA-256 reversible snapshots")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(LedgerTheme.muted)
+                Text(localizer.L(
+                    "Persistent LaunchAgents, orphan daemons & SHA-256 reversible snapshots",
+                    "常驻 LaunchAgents、孤儿守护进程与 SHA-256 可逆冻结账本"
+                ))
+                .font(.system(size: 12.5))
+                .foregroundStyle(LedgerTheme.muted)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
             }
 
-            Spacer()
+            Spacer(minLength: 12)
+
+            LanguageTogglePill(localizer: localizer)
 
             Button(action: { monitor.refresh() }) {
                 HStack(spacing: 5) {
                     Image(systemName: "arrow.clockwise")
                         .font(.system(size: 11, weight: .semibold))
-                    Text("Rescan host")
+                    Text(localizer.L("Rescan host", "重新扫描"))
                         .font(.system(size: 12, weight: .medium))
                 }
                 .foregroundStyle(LedgerTheme.ink)
@@ -106,31 +117,37 @@ public struct MainDashboardView: View {
             HStack(alignment: .top, spacing: 0) {
                 ledgerMetricCell(
                     value: ByteFormatter.memory(monitor.snapshot.totalBackgroundRSSBytes),
-                    label: "Background resident RAM",
-                    detail: "Non-Apple persistent footprint",
+                    label: localizer.L("Background resident RAM", "后台常驻内存 (RSS)"),
+                    detail: localizer.L("Non-Apple persistent footprint", "非 Apple 常驻进程总占用"),
                     accent: LedgerTheme.ink
                 )
                 verticalRule
                 ledgerMetricCell(
                     value: "\(monitor.snapshot.runningNonAppleCount)",
-                    label: "Active background services",
-                    detail: "\(monitor.snapshot.frozenRecords.count) frozen in snapshot vault",
+                    label: localizer.L("Active background services", "活跃后台服务"),
+                    detail: localizer.L(
+                        "\(monitor.snapshot.frozenRecords.count) frozen in snapshot vault",
+                        "快照保险库已冻结 \(monitor.snapshot.frozenRecords.count) 项"
+                    ),
                     accent: LedgerTheme.cobalt
                 )
                 verticalRule
                 ledgerMetricCell(
                     value: ByteFormatter.memory(monitor.snapshot.orphanRSSBytes),
-                    label: "Orphan daemon memory",
+                    label: localizer.L("Orphan daemon memory", "孤儿守护进程内存"),
                     detail: monitor.snapshot.orphanItems.isEmpty
-                        ? "Zero PPID=1 orphan daemons"
-                        : "\(monitor.snapshot.orphanItems.count) detached PPID=1 processes",
+                        ? localizer.L("Zero PPID=1 orphan daemons", "0 个 PPID=1 脱离终端进程")
+                        : localizer.L(
+                            "\(monitor.snapshot.orphanItems.count) detached PPID=1 processes",
+                            "\(monitor.snapshot.orphanItems.count) 个脱离终端的 PPID=1 进程"
+                        ),
                     accent: monitor.snapshot.orphanItems.isEmpty ? LedgerTheme.ink : LedgerTheme.terracotta
                 )
                 verticalRule
                 ledgerMetricCell(
                     value: "\(monitor.snapshot.totalListeningPortCount)",
-                    label: "Bound local TCP ports",
-                    detail: "Live lsof TCP socket scan",
+                    label: localizer.L("Bound local TCP ports", "已监听本地 TCP 端口"),
+                    detail: localizer.L("Live lsof TCP socket scan", "实时 lsof 监听套接字扫描"),
                     accent: LedgerTheme.forest
                 )
             }
@@ -159,6 +176,7 @@ public struct MainDashboardView: View {
             Text(label)
                 .font(.system(size: 12, weight: .medium))
                 .foregroundStyle(LedgerTheme.ink.opacity(0.88))
+                .lineLimit(1)
             Text(detail)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(LedgerTheme.muted)
@@ -207,9 +225,11 @@ public struct MainDashboardView: View {
                             .font(.system(size: 11, weight: .medium))
                             .foregroundStyle(LedgerTheme.ink.opacity(0.86))
                             .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                         Text(ByteFormatter.memory(item.rssBytes))
                             .font(.system(size: 11, design: .monospaced))
                             .foregroundStyle(LedgerTheme.muted)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                 }
                 if remainder > 0 {
@@ -217,9 +237,13 @@ public struct MainDashboardView: View {
                         Circle()
                             .fill(LedgerTheme.subtle.opacity(0.5))
                             .frame(width: 6, height: 6)
-                        Text("Other \(ByteFormatter.memory(remainder))")
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(LedgerTheme.muted)
+                        Text(localizer.L(
+                            "Other \(ByteFormatter.memory(remainder))",
+                            "其他 \(ByteFormatter.memory(remainder))"
+                        ))
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(LedgerTheme.muted)
+                        .fixedSize(horizontal: true, vertical: false)
                     }
                 }
                 Spacer()
@@ -228,8 +252,10 @@ public struct MainDashboardView: View {
     }
 
     private func shortLegendName(_ label: String) -> String {
-        if label.count <= 24 { return label }
-        return String(label.prefix(22)) + "…"
+        if let pidRange = label.range(of: " (PID ", options: .backwards) {
+            return String(label[..<pidRange.lowerBound])
+        }
+        return label
     }
 
     // MARK: - Segmented Well Filter & Search Bar
@@ -241,7 +267,7 @@ public struct MainDashboardView: View {
                     let active = monitor.selectedFilter == tab
                     Button(action: { monitor.selectedFilter = tab }) {
                         HStack(spacing: 5) {
-                            Text(tab.rawValue)
+                            Text(tab.localizedTitle(localizer))
                                 .font(.system(size: 12, weight: active ? .semibold : .regular))
                                 .foregroundStyle(active ? LedgerTheme.ink : LedgerTheme.muted)
                             Text(verbatim: "\(countForTab(tab))")
@@ -268,6 +294,7 @@ public struct MainDashboardView: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(LedgerTheme.well)
             )
+            .fixedSize(horizontal: true, vertical: false)
 
             Spacer()
 
@@ -276,7 +303,7 @@ public struct MainDashboardView: View {
                     Image(systemName: monitor.showAppleSystem ? "checkmark.square.fill" : "square")
                         .font(.system(size: 12))
                         .foregroundStyle(monitor.showAppleSystem ? LedgerTheme.cobalt : LedgerTheme.subtle)
-                    Text("Apple services")
+                    Text(localizer.L("Apple services", "显示 Apple 服务"))
                         .font(.system(size: 12))
                         .foregroundStyle(LedgerTheme.muted)
                 }
@@ -286,21 +313,22 @@ public struct MainDashboardView: View {
             }
             .buttonStyle(.plain)
 
+            let placeholder = localizer.L("Filter label, command, or port", "筛选服务标识、命令或端口")
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .font(.system(size: 11))
                     .foregroundStyle(LedgerTheme.subtle)
                 if monitor.isStaticPreview {
-                    Text(monitor.searchQuery.isEmpty ? "Filter label, command, or port" : monitor.searchQuery)
+                    Text(monitor.searchQuery.isEmpty ? placeholder : monitor.searchQuery)
                         .font(.system(size: 12))
                         .foregroundStyle(monitor.searchQuery.isEmpty ? LedgerTheme.subtle : LedgerTheme.ink)
-                        .frame(width: 168, alignment: .leading)
+                        .frame(width: 184, alignment: .leading)
                 } else {
-                    TextField("Filter label, command, or port", text: $monitor.searchQuery)
+                    TextField(placeholder, text: $monitor.searchQuery)
                         .textFieldStyle(.plain)
                         .font(.system(size: 12))
                         .foregroundStyle(LedgerTheme.ink)
-                        .frame(width: 168)
+                        .frame(width: 184)
                 }
             }
             .padding(.horizontal, 9)
@@ -334,16 +362,16 @@ public struct MainDashboardView: View {
 
     private var ledgerTableHeader: some View {
         HStack(spacing: 12) {
-            Text("Service label & launch command")
+            Text(localizer.L("Service label & launch command", "服务标识与启动命令"))
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text("Domain")
-                .frame(width: 118, alignment: .leading)
-            Text("PID / TCP ports")
-                .frame(width: 124, alignment: .leading)
-            Text("Resident memory")
-                .frame(width: 148, alignment: .trailing)
-            Text("Control")
-                .frame(width: 108, alignment: .trailing)
+            Text(localizer.L("Domain", "所属域"))
+                .frame(width: 112, alignment: .leading)
+            Text(localizer.L("PID / TCP ports", "PID / 监听端口"))
+                .frame(width: 112, alignment: .leading)
+            Text(localizer.L("Resident memory", "常驻内存 (RSS)"))
+                .frame(width: 140, alignment: .trailing)
+            Text(localizer.L("Control", "操作"))
+                .frame(width: 98, alignment: .trailing)
         }
         .font(.system(size: 11, weight: .semibold))
         .foregroundStyle(LedgerTheme.muted)
@@ -375,7 +403,7 @@ public struct MainDashboardView: View {
 
     @ViewBuilder
     private func ledgerRowsListContent(maxRSS: Int64) -> some View {
-        if let banner = monitor.statusMessage {
+        if let banner = monitor.localizedStatusText(localizer) {
             HStack(spacing: 8) {
                 Image(systemName: monitor.statusIsError ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
                     .font(.system(size: 12))
@@ -395,12 +423,15 @@ public struct MainDashboardView: View {
 
         if monitor.filteredItems.isEmpty {
             VStack(spacing: 6) {
-                Text("No matching background services")
+                Text(localizer.L("No matching background services", "未找到匹配的后台服务"))
                     .font(.system(size: 14, weight: .medium))
                     .foregroundStyle(LedgerTheme.ink)
-                Text("Adjust the active filter segment or clear the search query to inspect all services.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(LedgerTheme.muted)
+                Text(localizer.L(
+                    "Adjust the active filter segment or clear the search query to inspect all services.",
+                    "请切换上方筛选标签或清空搜索关键词以查看全部服务。"
+                ))
+                .font(.system(size: 12))
+                .foregroundStyle(LedgerTheme.muted)
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 48)
@@ -432,16 +463,17 @@ public struct MainDashboardView: View {
                         .foregroundStyle(item.isFrozen ? LedgerTheme.muted : LedgerTheme.ink)
                         .lineLimit(1)
                     if item.keepAlive {
-                        Text("KeepAlive")
+                        Text(localizer.L("KeepAlive", "常驻保活"))
                             .font(.system(size: 10, weight: .medium, design: .monospaced))
                             .foregroundStyle(LedgerTheme.muted)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
+                            .fixedSize(horizontal: true, vertical: false)
                             .background(RoundedRectangle(cornerRadius: 4).fill(LedgerTheme.well))
                     }
                 }
-                Text(LaunchLensMonitor.displayPath(item.programCommand))
-                    .font(.system(size: 11, design: .monospaced))
+                Text(LaunchLensMonitor.displayPath(item.localizedProgramCommand(localizer)))
+                    .font(.system(size: 10.5, design: .monospaced))
                     .foregroundStyle(LedgerTheme.muted)
                     .lineLimit(1)
             }
@@ -452,11 +484,14 @@ public struct MainDashboardView: View {
                 RoundedRectangle(cornerRadius: 1.5)
                     .fill(item.isFrozen ? LedgerTheme.cobalt : item.domain.color)
                     .frame(width: 3, height: 12)
-                Text(item.isFrozen ? "Frozen plist" : item.domain.shortBadge)
+                Text(item.isFrozen
+                     ? localizer.L("Frozen plist", "已冻结配置")
+                     : item.domain.localizedBadge(localizer))
                     .font(.system(size: 11.5, weight: .medium))
                     .foregroundStyle(item.isFrozen ? LedgerTheme.cobalt : item.domain.color)
+                    .fixedSize(horizontal: true, vertical: false)
             }
-            .frame(width: 118, alignment: .leading)
+            .frame(width: 112, alignment: .leading)
 
             // PID & Listening Ports
             VStack(alignment: .leading, spacing: 2) {
@@ -465,7 +500,9 @@ public struct MainDashboardView: View {
                         .font(.system(size: 12, weight: .medium, design: .monospaced))
                         .foregroundStyle(LedgerTheme.ink)
                 } else {
-                    Text(item.isFrozen ? "Unloaded" : "Idle")
+                    Text(item.isFrozen
+                         ? localizer.L("Unloaded", "已卸载")
+                         : localizer.L("Idle", "空闲"))
                         .font(.system(size: 12))
                         .foregroundStyle(LedgerTheme.subtle)
                 }
@@ -476,7 +513,7 @@ public struct MainDashboardView: View {
                         .lineLimit(1)
                 }
             }
-            .frame(width: 124, alignment: .leading)
+            .frame(width: 112, alignment: .leading)
 
             // RSS Memory + Inline Proportional Bar
             VStack(alignment: .trailing, spacing: 4) {
@@ -493,22 +530,22 @@ public struct MainDashboardView: View {
                 ZStack(alignment: .trailing) {
                     RoundedRectangle(cornerRadius: 2)
                         .fill(LedgerTheme.well)
-                        .frame(width: 116, height: 4)
+                        .frame(width: 114, height: 4)
                     if item.rssBytes > 0 {
                         RoundedRectangle(cornerRadius: 2)
                             .fill(isOrphan ? LedgerTheme.terracotta : LedgerTheme.cobalt)
-                            .frame(width: max(4, 116 * ratio), height: 4)
+                            .frame(width: max(4, 114 * ratio), height: 4)
                     }
                 }
             }
-            .frame(width: 148, alignment: .trailing)
+            .frame(width: 140, alignment: .trailing)
 
             // Action Column
             HStack {
                 Spacer()
                 actionControl(for: item)
             }
-            .frame(width: 108, alignment: .trailing)
+            .frame(width: 98, alignment: .trailing)
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 8.5)
@@ -519,11 +556,12 @@ public struct MainDashboardView: View {
     private func actionControl(for item: LaunchItem) -> some View {
         if item.isFrozen {
             Button(action: { monitor.restoreByLabel(item.label) }) {
-                Text("Restore")
+                Text(localizer.L("Restore", "恢复"))
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(LedgerTheme.forest)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
+                    .fixedSize(horizontal: true, vertical: false)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .fill(LedgerTheme.forest.opacity(0.10))
@@ -539,12 +577,13 @@ public struct MainDashboardView: View {
                 HStack(spacing: 4) {
                     Image(systemName: "snowflake")
                         .font(.system(size: 10, weight: .semibold))
-                    Text("Freeze")
+                    Text(localizer.L("Freeze", "冻结"))
                         .font(.system(size: 11, weight: .semibold))
                 }
                 .foregroundStyle(LedgerTheme.cobalt)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 4)
+                .fixedSize(horizontal: true, vertical: false)
                 .background(
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .fill(LedgerTheme.cobalt.opacity(0.09))
@@ -557,11 +596,12 @@ public struct MainDashboardView: View {
             .buttonStyle(.plain)
         } else if item.domain == .orphanDaemon {
             Button(action: { monitor.terminateOrphan(item) }) {
-                Text("Stop PID")
+                Text(localizer.L("Stop PID", "终止进程"))
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(LedgerTheme.terracotta)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
+                    .fixedSize(horizontal: true, vertical: false)
                     .background(
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .fill(LedgerTheme.terracotta.opacity(0.10))
@@ -573,9 +613,10 @@ public struct MainDashboardView: View {
             }
             .buttonStyle(.plain)
         } else {
-            Text("Read-only")
+            Text(localizer.L("Read-only", "只读保护"))
                 .font(.system(size: 11))
                 .foregroundStyle(LedgerTheme.subtle)
+                .fixedSize(horizontal: true, vertical: false)
         }
     }
 
@@ -586,24 +627,32 @@ public struct MainDashboardView: View {
             Image(systemName: "lock.shield.fill")
                 .font(.system(size: 12.5))
                 .foregroundStyle(LedgerTheme.cobalt)
-            Text("Snapshot vault (\(monitor.snapshot.frozenRecords.count))")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(LedgerTheme.ink)
+            Text(localizer.L(
+                "Snapshot vault (\(monitor.snapshot.frozenRecords.count))",
+                "快照保险库 (\(monitor.snapshot.frozenRecords.count))"
+            ))
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(LedgerTheme.ink)
+            .fixedSize(horizontal: true, vertical: false)
 
             if let latest = monitor.snapshot.frozenRecords.first {
-                Text("\(latest.label) · \(ByteFormatter.memory(latest.rssBytesAtFreeze)) reclaimed · sha256:\(String(latest.sha256Hex.prefix(10)))")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(LedgerTheme.muted)
-                    .lineLimit(1)
+                Text(localizer.L(
+                    "\(latest.label) · \(ByteFormatter.memory(latest.rssBytesAtFreeze)) reclaimed · sha256:\(String(latest.sha256Hex.prefix(10)))",
+                    "\(latest.label) · 已释放 \(ByteFormatter.memory(latest.rssBytesAtFreeze)) · sha256:\(String(latest.sha256Hex.prefix(10)))"
+                ))
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(LedgerTheme.muted)
+                .lineLimit(1)
 
                 Spacer()
 
                 Button(action: { monitor.restore(latest) }) {
-                    Text("Restore latest")
+                    Text(localizer.L("Restore latest", "恢复最近快照"))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(LedgerTheme.ink)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 4)
+                        .fixedSize(horizontal: true, vertical: false)
                         .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(LedgerTheme.sheet))
                         .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(LedgerTheme.hairline, lineWidth: 1))
                 }

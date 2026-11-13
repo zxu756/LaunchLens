@@ -209,4 +209,83 @@ struct LaunchLensCoreTests {
         #expect(mainData.count > 25_000)
         #expect(menuData.count > 10_000)
     }
+
+    @Test("Toggles live between zh-Hans and en and localizes freeze banners")
+    @MainActor
+    func testLanguageToggleAndBannerLocalization() throws {
+        let suiteName = "launchlens.i18n.toggle.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let key = "local.xu.LaunchLens.language"
+        let localizer = AppLocalizer(
+            arguments: ["LaunchLens"],
+            userDefaults: defaults,
+            preferenceKey: key,
+            preferredLanguages: ["en-US"]
+        )
+        #expect(localizer.language == .en)
+        #expect(localizer.language.badge == "EN")
+
+        let monitor = LaunchLensMonitor.preview()
+        let enBanner = try #require(monitor.localizedStatusText(localizer))
+        #expect(enBanner.contains("Frozen"))
+
+        localizer.toggle()
+        #expect(localizer.language == .zhHans)
+        #expect(localizer.language.badge == "中文")
+        #expect(defaults.string(forKey: key) == "zh-Hans")
+
+        let zhBanner = try #require(monitor.localizedStatusText(localizer))
+        #expect(zhBanner.contains("已冻结"))
+        #expect(LaunchFilterTab.frozenVault.localizedTitle(localizer) == "冻结保险库")
+    }
+
+    @Test("Auto-detects Chinese system locale and respects UserDefaults & --lang flag")
+    @MainActor
+    func testChineseLocaleAutoDetectAndCLIFlag() throws {
+        let suiteName = "launchlens.i18n.cli.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let key = "local.xu.LaunchLens.language"
+        let autoZH = AppLocalizer(
+            arguments: ["LaunchLens"],
+            userDefaults: defaults,
+            preferenceKey: key,
+            preferredLanguages: ["zh-Hans-CN", "en-US"]
+        )
+        #expect(autoZH.language == .zhHans)
+
+        defaults.set("en", forKey: key)
+        let savedEN = AppLocalizer(
+            arguments: ["LaunchLens"],
+            userDefaults: defaults,
+            preferenceKey: key,
+            preferredLanguages: ["zh-Hans-CN"]
+        )
+        #expect(savedEN.language == .en)
+
+        let cliZH = AppLocalizer(
+            arguments: ["LaunchLens", "--lang", "zh"],
+            userDefaults: defaults,
+            preferenceKey: key,
+            preferredLanguages: ["en-US"]
+        )
+        #expect(cliZH.language == .zhHans)
+
+        let outDir = FileManager.default.temporaryDirectory.appendingPathComponent("LaunchLensShotsZH-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: outDir) }
+        try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+        let sentinel = Data("keep-en-main".utf8)
+        let enMain = outDir.appendingPathComponent("screenshot-main.png")
+        try sentinel.write(to: enMain)
+
+        try ScreenshotExporter.exportMarketingScreenshots(to: outDir, language: .zhHans)
+        #expect(try Data(contentsOf: enMain) == sentinel)
+        let zhMain = try Data(contentsOf: outDir.appendingPathComponent("screenshot-main-zh.png"))
+        let zhMenu = try Data(contentsOf: outDir.appendingPathComponent("screenshot-menubar-zh.png"))
+        #expect(zhMain.count > 25_000)
+        #expect(zhMenu.count > 10_000)
+    }
 }

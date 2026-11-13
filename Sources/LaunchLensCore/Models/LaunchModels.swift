@@ -18,6 +18,16 @@ public enum ServiceDomain: String, CaseIterable, Codable, Identifiable, Sendable
         }
     }
 
+    @MainActor
+    public func localizedBadge(_ localizer: AppLocalizer) -> String {
+        switch self {
+        case .userAgent: return localizer.L("User agent", "用户代理")
+        case .orphanDaemon: return localizer.L("Orphan daemon", "孤儿进程")
+        case .globalAgent: return localizer.L("Global agent", "全局代理")
+        case .systemDaemon: return localizer.L("System daemon", "系统守护进程")
+        }
+    }
+
     public var color: Color {
         switch self {
         case .userAgent: return Color(red: 0.118, green: 0.337, blue: 0.627)     // Deep Cryo Cobalt #1E56A0
@@ -82,6 +92,18 @@ public struct LaunchItem: Identifiable, Codable, Equatable, Sendable {
 
     public var isRunning: Bool {
         (pid ?? 0) > 0
+    }
+
+    @MainActor
+    public func localizedProgramCommand(_ localizer: AppLocalizer) -> String {
+        if isFrozen {
+            let fileName = plistPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "\(label).plist"
+            return localizer.L(
+                "Frozen snapshot (\(fileName))",
+                "已冻结快照归档（\(fileName)）"
+            )
+        }
+        return programCommand
     }
 }
 

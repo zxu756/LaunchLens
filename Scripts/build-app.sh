@@ -31,7 +31,8 @@ echo "==> Ad-hoc signing & verifying..."
 codesign --force --deep --sign - "$APP_BUNDLE"
 codesign --verify --deep --strict "$APP_BUNDLE"
 
-echo "==> Rendering 2x Retina screenshots to docs/..."
-"$APP_BUNDLE/Contents/MacOS/$APP_NAME" --export-screenshots "$ROOT/docs"
+echo "==> Rendering 2x Retina screenshots (EN + zh-Hans) to docs/..."
+"$APP_BUNDLE/Contents/MacOS/$APP_NAME" --export-screenshots "$ROOT/docs" --lang en
+"$APP_BUNDLE/Contents/MacOS/$APP_NAME" --export-screenshots "$ROOT/docs" --lang zh
 
 echo "✓ Built $APP_BUNDLE"

@@ -11,6 +11,68 @@ public enum LaunchFilterTab: String, CaseIterable, Identifiable, Sendable {
     case frozenVault = "Frozen vault"
 
     public var id: String { rawValue }
+
+    @MainActor
+    public func localizedTitle(_ localizer: AppLocalizer) -> String {
+        switch self {
+        case .all: return localizer.L("All services", "全部服务")
+        case .userAgents: return localizer.L("User agents", "用户代理")
+        case .orphans: return localizer.L("Orphan daemons", "孤儿进程")
+        case .globalAndSystem: return localizer.L("Global & system", "全局与系统")
+        case .frozenVault: return localizer.L("Frozen vault", "冻结保险库")
+        }
+    }
+}
+
+public enum LaunchStatusBanner: Equatable, Sendable {
+    case frozenWithReclaim(label: String, reclaimed: String, shaPrefix: String)
+    case frozenSaved(label: String, shaPrefix: String)
+    case restored(label: String)
+    case missingSnapshot(label: String)
+    case orphanStopped(label: String)
+    case orphanSignalFailed(pid: Int)
+    case freezeError(FreezeError)
+    case custom(en: String, zh: String)
+
+    @MainActor
+    public func localizedText(_ localizer: AppLocalizer) -> String {
+        switch self {
+        case let .frozenWithReclaim(label, reclaimed, shaPrefix):
+            return localizer.L(
+                "Frozen \(label) — \(reclaimed) reclaimed, SHA-256 \(shaPrefix) verified.",
+                "已冻结 \(label) — 已释放 \(reclaimed) 内存，SHA-256 (\(shaPrefix)) 校验通过。"
+            )
+        case let .frozenSaved(label, shaPrefix):
+            return localizer.L(
+                "Frozen \(label) — SHA-256 verified snapshot saved (\(shaPrefix)).",
+                "已冻结 \(label) — SHA-256 校验快照已归档 (\(shaPrefix))。"
+            )
+        case let .restored(label):
+            return localizer.L(
+                "Restored \(label) back to LaunchAgents and bootstrapped.",
+                "已将 \(label) 恢复至 LaunchAgents 并重新引导加载。"
+            )
+        case let .missingSnapshot(label):
+            return localizer.L(
+                "No snapshot record found for \(label).",
+                "未在快照保险库中找到 \(label) 的备份记录。"
+            )
+        case let .orphanStopped(label):
+            return localizer.L(
+                "Sent SIGTERM to orphan process \(label).",
+                "已向孤儿守护进程 \(label) 发送 SIGTERM 终止信号。"
+            )
+        case let .orphanSignalFailed(pid):
+            return localizer.L(
+                "Could not signal PID \(pid); process may have already exited.",
+                "无法向 PID \(pid) 发送信号，该进程可能已自行退出。"
+            )
+        case let .freezeError(err):
+            return err.localizedMessage(localizer)
+        case let .custom(en, zh):
+            return localizer.L(en, zh)
+        }
+    }
 }
 
 @MainActor
@@ -19,6 +81,7 @@ public final class LaunchLensMonitor: ObservableObject {
     @Published public var selectedFilter: LaunchFilterTab = .all
     @Published public var searchQuery: String = ""
     @Published public var showAppleSystem: Bool = false
+    @Published public var statusBanner: LaunchStatusBanner?
     @Published public var statusMessage: String?
     @Published public var statusIsError: Bool = false
 
@@ -52,6 +115,13 @@ public final class LaunchLensMonitor: ObservableObject {
     public func refresh() {
         guard !isStaticPreview else { return }
         snapshot = LaunchScanner.scanLiveHost(ledgerStore: ledgerStore)
+    }
+
+    public func localizedStatusText(_ localizer: AppLocalizer) -> String? {
+        if let statusBanner {
+            return statusBanner.localizedText(localizer)
+        }
+        return statusMessage
     }
 
     public var filteredItems: [LaunchItem] {
@@ -98,11 +168,18 @@ public final class LaunchLensMonitor: ObservableObject {
     public func freeze(_ item: LaunchItem) {
         do {
             let rec = try ledgerStore.freeze(item: item)
+            let prefix = String(rec.sha256Hex.prefix(10))
             statusIsError = false
-            statusMessage = "Frozen \(rec.label) — SHA-256 verified snapshot saved (\(String(rec.sha256Hex.prefix(10))))."
+            statusBanner = .frozenSaved(label: rec.label, shaPrefix: prefix)
+            statusMessage = statusBanner?.localizedText(.shared)
             refresh()
+        } catch let freezeErr as FreezeError {
+            statusIsError = true
+            statusBanner = .freezeError(freezeErr)
+            statusMessage = freezeErr.errorDescription
         } catch {
             statusIsError = true
+            statusBanner = .custom(en: error.localizedDescription, zh: error.localizedDescription)
             statusMessage = error.localizedDescription
         }
     }
@@ -111,10 +188,16 @@ public final class LaunchLensMonitor: ObservableObject {
         do {
             try ledgerStore.restore(recordID: record.id)
             statusIsError = false
-            statusMessage = "Restored \(record.label) back to LaunchAgents and bootstrapped."
+            statusBanner = .restored(label: record.label)
+            statusMessage = statusBanner?.localizedText(.shared)
             refresh()
+        } catch let freezeErr as FreezeError {
+            statusIsError = true
+            statusBanner = .freezeError(freezeErr)
+            statusMessage = freezeErr.errorDescription
         } catch {
             statusIsError = true
+            statusBanner = .custom(en: error.localizedDescription, zh: error.localizedDescription)
             statusMessage = error.localizedDescription
         }
     }
@@ -122,7 +205,8 @@ public final class LaunchLensMonitor: ObservableObject {
     public func restoreByLabel(_ label: String) {
         guard let record = snapshot.frozenRecords.first(where: { $0.label == label }) else {
             statusIsError = true
-            statusMessage = "No snapshot record found for \(label)."
+            statusBanner = .missingSnapshot(label: label)
+            statusMessage = statusBanner?.localizedText(.shared)
             return
         }
         restore(record)
@@ -132,11 +216,13 @@ public final class LaunchLensMonitor: ObservableObject {
         guard item.domain == .orphanDaemon, let pid = item.pid else { return }
         if ledgerStore.terminateOrphan(pid: pid) {
             statusIsError = false
-            statusMessage = "Sent SIGTERM to orphan process \(item.label)."
+            statusBanner = .orphanStopped(label: item.label)
+            statusMessage = statusBanner?.localizedText(.shared)
             refresh()
         } else {
             statusIsError = true
-            statusMessage = "Could not signal PID \(pid); process may have already exited."
+            statusBanner = .orphanSignalFailed(pid: pid)
+            statusMessage = statusBanner?.localizedText(.shared)
         }
     }
 
@@ -268,34 +354,47 @@ public final class LaunchLensMonitor: ObservableObject {
 
         let snap = LaunchSnapshot(capturedAt: now, items: items, frozenRecords: [frozenRecord])
         let monitor = LaunchLensMonitor(snapshot: snap, isStaticPreview: true, autoRefreshSeconds: nil)
-        monitor.statusMessage = "Frozen com.updater.telemetry-helper — 412 MB reclaimed, SHA-256 9f4c82b1e0 verified."
+        monitor.statusBanner = .frozenWithReclaim(
+            label: "com.updater.telemetry-helper",
+            reclaimed: "412 MB",
+            shaPrefix: "9f4c82b1e0"
+        )
+        monitor.statusMessage = monitor.statusBanner?.localizedText(.shared)
         return monitor
     }
 }
 
 public enum ScreenshotExporter {
     @MainActor
-    public static func exportMarketingScreenshots(to directory: URL) throws {
+    public static func exportMarketingScreenshots(
+        to directory: URL,
+        language: AppLanguage = .en
+    ) throws {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         let monitor = LaunchLensMonitor.preview()
+        let localizer = AppLocalizer(fixedLanguage: language)
+        let suffix = (language == .zhHans) ? "-zh" : ""
 
-        let mainView = MainDashboardView(monitor: monitor)
-            .frame(width: 980, height: 730)
+        let mainView = MainDashboardView(monitor: monitor, localizer: localizer)
+            .environment(\.locale, language.locale)
+            .frame(width: 1115, height: 735)
             .environment(\.colorScheme, .light)
 
-        try renderPNG(view: mainView, to: directory.appendingPathComponent("screenshot-main.png"))
+        try renderPNG(view: mainView, to: directory.appendingPathComponent("screenshot-main\(suffix).png"))
 
         let popoverView = MenuBarPopoverView(
             monitor: monitor,
+            localizer: localizer,
             onOpenDashboard: {},
             onQuit: {}
         )
-        .frame(width: 380, height: 422)
+        .environment(\.locale, language.locale)
+        .frame(width: 420, height: 438)
         .padding(14)
         .background(Color(red: 0.925, green: 0.918, blue: 0.890))
         .environment(\.colorScheme, .light)
 
-        try renderPNG(view: popoverView, to: directory.appendingPathComponent("screenshot-menubar.png"))
+        try renderPNG(view: popoverView, to: directory.appendingPathComponent("screenshot-menubar\(suffix).png"))
     }
 
     @MainActor
