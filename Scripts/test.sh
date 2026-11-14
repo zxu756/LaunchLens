@@ -8,8 +8,8 @@ usage() {
     cat >&2 <<'EOF'
 Usage:
   Scripts/test.sh scope <Module...>     # e.g. Freeze | Scanner | CLI | UI
-  Scripts/test.sh milestone <0|1>
-  Scripts/test.sh release
+  Scripts/test.sh milestone <0|1> [--record]
+  Scripts/test.sh release [--record]
 EOF
     exit 2
 }
@@ -59,34 +59,59 @@ case "$MODE" in
         swift test --no-parallel --filter "$REGEX"
         ;;
     milestone)
-        if [[ $# -ne 1 ]]; then
+        if [[ $# -lt 1 ]]; then
             usage
         fi
         MS="$1"
+        shift
+        RECORD_FLAG=()
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --record)
+                    RECORD_FLAG=("--record")
+                    ;;
+                *)
+                    usage
+                    ;;
+            esac
+            shift
+        done
         case "$MS" in
             0|M0|m0)
                 swift build --product LaunchLens >/dev/null
                 echo "==> [M0] Running all M0 unit test scopes (Freeze, Scanner, CLI, UI)..."
                 swift test --no-parallel --filter "FreezeLedgerTests|ScannerCorrelationTests|CLIRunnerTests|UIAndLocalizationTests"
                 echo "==> [M0] Running Scripts/acceptance/m0-acceptance.sh..."
-                "$ROOT/Scripts/acceptance/m0-acceptance.sh"
-                echo "==> [M0] Running Scripts/acceptance/readme-commands.sh..."
-                "$ROOT/Scripts/acceptance/readme-commands.sh"
+                "$ROOT/Scripts/acceptance/m0-acceptance.sh" "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}"
+                echo "==> [M0] Running Scripts/acceptance/readme-commands.sh (milestone 0 isolated mode)..."
+                "$ROOT/Scripts/acceptance/readme-commands.sh" --mode milestone0 "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}"
                 ;;
             *)
-                echo "Error: Milestone '$MS' is not yet implemented (only milestone 0 is available on m0/honest)." >&2
+                echo "Error: Milestone '$MS' is not yet implemented (only milestone 0 is available)." >&2
                 exit 2
                 ;;
         esac
         ;;
     release)
+        RECORD_FLAG=()
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --record)
+                    RECORD_FLAG=("--record")
+                    ;;
+                *)
+                    usage
+                    ;;
+            esac
+            shift
+        done
         swift build --product LaunchLens >/dev/null
         echo "==> [Release] Running full unit test suite..."
         swift test --no-parallel
         echo "==> [Release] Running Scripts/acceptance/m0-acceptance.sh..."
-        "$ROOT/Scripts/acceptance/m0-acceptance.sh"
-        echo "==> [Release] Running Scripts/acceptance/readme-commands.sh..."
-        "$ROOT/Scripts/acceptance/readme-commands.sh"
+        "$ROOT/Scripts/acceptance/m0-acceptance.sh" "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}"
+        echo "==> [Release] Running Scripts/acceptance/readme-commands.sh (release mode)..."
+        "$ROOT/Scripts/acceptance/readme-commands.sh" --mode release "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}"
         if [[ "${LAUNCHLENS_REAL_LAUNCHD:-0}" == "1" ]]; then
             if [[ -x "$ROOT/Scripts/acceptance/m1-real-launchd.sh" ]]; then
                 "$ROOT/Scripts/acceptance/m1-real-launchd.sh"

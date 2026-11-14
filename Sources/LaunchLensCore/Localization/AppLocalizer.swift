@@ -38,6 +38,13 @@ public enum AppLanguage: String, CaseIterable, Codable, Identifiable, Sendable {
     }
 }
 
+public protocol PreferenceStoring: AnyObject {
+    func string(forKey defaultName: String) -> String?
+    func set(_ value: Any?, forKey defaultName: String)
+}
+
+extension UserDefaults: PreferenceStoring {}
+
 @MainActor
 public final class AppLocalizer: ObservableObject {
     nonisolated public static let defaultPreferenceKey = "local.xu.LaunchLens.language"
@@ -46,22 +53,38 @@ public final class AppLocalizer: ObservableObject {
     @Published public var language: AppLanguage {
         didSet {
             guard persistChanges else { return }
-            userDefaults.set(language.rawValue, forKey: preferenceKey)
+            preferenceStore.set(language.rawValue, forKey: preferenceKey)
         }
     }
 
     public let preferenceKey: String
-    private let userDefaults: UserDefaults
+    private let preferenceStore: any PreferenceStoring
     private var persistChanges: Bool
 
-    public init(
+    public convenience init(
         arguments: [String] = CommandLine.arguments,
         userDefaults: UserDefaults = .standard,
         preferenceKey: String = AppLocalizer.defaultPreferenceKey,
         preferredLanguages: [String] = Locale.preferredLanguages,
         persistCLI: Bool = false
     ) {
-        self.userDefaults = userDefaults
+        self.init(
+            arguments: arguments,
+            preferenceStore: userDefaults,
+            preferenceKey: preferenceKey,
+            preferredLanguages: preferredLanguages,
+            persistCLI: persistCLI
+        )
+    }
+
+    public init(
+        arguments: [String] = CommandLine.arguments,
+        preferenceStore: any PreferenceStoring,
+        preferenceKey: String = AppLocalizer.defaultPreferenceKey,
+        preferredLanguages: [String] = Locale.preferredLanguages,
+        persistCLI: Bool = false
+    ) {
+        self.preferenceStore = preferenceStore
         self.preferenceKey = preferenceKey
         self.persistChanges = true
 
@@ -69,7 +92,7 @@ public final class AppLocalizer: ObservableObject {
             self.persistChanges = persistCLI
             self.language = cliLang
             self.persistChanges = true
-        } else if let saved = userDefaults.string(forKey: preferenceKey),
+        } else if let saved = preferenceStore.string(forKey: preferenceKey),
                   let parsed = AppLanguage(rawValue: saved) ?? AppLanguage.parseCLI(saved) {
             self.language = parsed
         } else if let firstPreferred = preferredLanguages.first,
@@ -81,7 +104,7 @@ public final class AppLocalizer: ObservableObject {
     }
 
     public init(fixedLanguage: AppLanguage) {
-        self.userDefaults = .standard
+        self.preferenceStore = UserDefaults.standard
         self.preferenceKey = Self.defaultPreferenceKey
         self.persistChanges = false
         self.language = fixedLanguage

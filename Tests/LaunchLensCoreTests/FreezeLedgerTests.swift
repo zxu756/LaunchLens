@@ -233,6 +233,96 @@ struct FreezeLedgerTests {
         #expect(snapFiles.isEmpty)
     }
 
+    @Test("L13 & Row 2: Read-only 0555 ledger directory aborts freeze before bootout with 0 launchctl calls and leaves plist untouched")
+    @MainActor
+    func testReadOnlyLedgerDirectoryAbortsBeforeBootout() throws {
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensL13-\(UUID().uuidString)")
+        let agentsDir = tempRoot.appendingPathComponent("Library/LaunchAgents")
+        try fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+
+        // Subcase 1: Uninitialized vault directory set to 0555 while LaunchAgents stays writable (0755)
+        let vaultDir1 = tempRoot.appendingPathComponent("VaultFresh0555")
+        try fm.createDirectory(at: vaultDir1, withIntermediateDirectories: true)
+
+        // Subcase 2: Initialized vault directory (Snapshots/ & Staged/ writable 0755) with ledger parent dir set to 0555
+        let vaultDir2 = tempRoot.appendingPathComponent("VaultInit0555")
+        try fm.createDirectory(at: vaultDir2.appendingPathComponent("Snapshots"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: vaultDir2.appendingPathComponent("Staged"), withIntermediateDirectories: true)
+
+        defer {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: vaultDir1.path)
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: vaultDir2.path)
+            try? fm.removeItem(at: tempRoot)
+        }
+
+        let plistURL1 = agentsDir.appendingPathComponent("io.test.l13fresh.plist")
+        let orig1 = samplePlistData(label: "io.test.l13fresh")
+        try orig1.write(to: plistURL1)
+
+        let plistURL2 = agentsDir.appendingPathComponent("io.test.l13init.plist")
+        let orig2 = samplePlistData(label: "io.test.l13init")
+        try orig2.write(to: plistURL2)
+
+        try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: vaultDir1.path)
+        try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: vaultDir2.path)
+
+        // Verify Subcase 1 (fresh 0555 vaultDir)
+        let mock1 = ProgrammableLaunchctlMock()
+        let store1 = FreezeLedgerStore(
+            vaultDirectory: vaultDir1,
+            userLaunchAgentsDirectory: agentsDir,
+            uid: 501,
+            launchctlExecutor: mock1
+        )
+        let item1 = LaunchItem(
+            id: "user::io.test.l13fresh",
+            label: "io.test.l13fresh",
+            domain: .userAgent,
+            plistPath: plistURL1.path,
+            programCommand: "/usr/bin/true"
+        )
+        #expect(throws: FreezeError.self) {
+            try store1.freeze(item: item1)
+        }
+        #expect(mock1.calls.isEmpty)
+        #expect(fm.fileExists(atPath: plistURL1.path))
+        #expect(try Data(contentsOf: plistURL1) == orig1)
+
+        // Verify Subcase 2 (initialized Snapshots/Staged + 0555 ledger directory -> hits saveRecords pre-bootout check)
+        let mock2 = ProgrammableLaunchctlMock()
+        let store2 = FreezeLedgerStore(
+            vaultDirectory: vaultDir2,
+            userLaunchAgentsDirectory: agentsDir,
+            uid: 501,
+            launchctlExecutor: mock2
+        )
+        let item2 = LaunchItem(
+            id: "user::io.test.l13init",
+            label: "io.test.l13init",
+            domain: .userAgent,
+            plistPath: plistURL2.path,
+            programCommand: "/usr/bin/true"
+        )
+        var caught2: FreezeError?
+        do {
+            try store2.freeze(item: item2)
+        } catch let err as FreezeError {
+            caught2 = err
+        }
+        let err2 = try #require(caught2)
+        let enMsg = err2.localizedMessage(AppLocalizer(fixedLanguage: .en))
+        let zhMsg = err2.localizedMessage(AppLocalizer(fixedLanguage: .zhHans))
+        #expect(enMsg.contains("Vault directory is not writable"))
+        #expect(enMsg.contains("bootout was NOT called"))
+        #expect(zhMsg.contains("未调用 launchctl bootout"))
+        #expect(mock2.calls.isEmpty)
+        #expect(fm.fileExists(atPath: plistURL2.path))
+        #expect(try Data(contentsOf: plistURL2) == orig2)
+        let leftoverSnaps = (try? fm.contentsOfDirectory(atPath: store2.snapshotsDirectory.path)) ?? []
+        #expect(leftoverSnaps.isEmpty)
+    }
+
     @Test("L1 Step 6 Finalize Failure: Rolls back staged plist to LaunchAgents and re-bootstraps")
     func testFinalLedgerWriteFailureRollsBackStagedPlistAndBootstraps() throws {
         let fm = FileManager.default
@@ -682,5 +772,112 @@ struct FreezeLedgerTests {
         #expect(mock.calls[1].first == "bootstrap")
         #expect(store.loadRecords().isEmpty)
         #expect(!store.auditInterruptedTransactionsAndOrphanBackups().hasIssues)
+    }
+
+    @Test("L14: Crash after bootout before stage-move re-bootstraps service on recovery and checks bootstrap exit code")
+    @MainActor
+    func testCrashAfterBootoutBeforeMoveRebootstrapsAndChecksExitCode() throws {
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensL14-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        func stagePostBootoutCrashState(caseName: String) throws -> (agentsDir: URL, vaultDir: URL, canonicalPlistPath: String, snapURL: URL, originalBytes: Data) {
+            let caseRoot = tempRoot.appendingPathComponent(caseName)
+            let agentsDir = caseRoot.appendingPathComponent("Library/LaunchAgents")
+            let vaultDir = caseRoot.appendingPathComponent("Vault")
+            try fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+
+            let plistURL = agentsDir.appendingPathComponent("io.test.l14crash.plist")
+            let originalBytes = samplePlistData(label: "io.test.l14crash", program: "/opt/l14/daemon")
+            try originalBytes.write(to: plistURL)
+            let canonicalPlistPath = plistURL.resolvingSymlinksInPath().standardizedFileURL.path
+
+            let preCrashMock = ProgrammableLaunchctlMock()
+            let preCrashStore = FreezeLedgerStore(
+                vaultDirectory: vaultDir,
+                userLaunchAgentsDirectory: agentsDir,
+                uid: 501,
+                launchctlExecutor: preCrashMock
+            )
+
+            // Exact post-Step-4 / pre-Step-5 disk state:
+            // Step 2 wrote verified snapshot; Step 3 wrote .inProgress ledger record;
+            // Step 4 ran launchctl bootout (exit 0 -> service unloaded!);
+            // Crash occurred BEFORE Step 5 moved plistURL out of LaunchAgents.
+            try fm.createDirectory(at: preCrashStore.snapshotsDirectory, withIntermediateDirectories: true)
+            let snapURL = preCrashStore.snapshotsDirectory.appendingPathComponent("io.test.l14crash-tx14.plist")
+            try originalBytes.write(to: snapURL, options: .atomic)
+            let bootoutRes = preCrashMock.runLaunchctl(["bootout", "gui/501", canonicalPlistPath])
+            #expect(bootoutRes.exitCode == 0)
+
+            let inProgressRec = FreezeSnapshotRecord(
+                id: "tx14",
+                label: "io.test.l14crash",
+                originalPlistPath: canonicalPlistPath,
+                snapshotFilePath: snapURL.path,
+                stagedPlistPath: preCrashStore.stagingDirectory.appendingPathComponent("io.test.l14crash-tx14.staged.plist").path,
+                sha256Hex: FreezeLedgerStore.sha256Hex(originalBytes),
+                frozenAt: Date(),
+                rssBytesAtFreeze: 0,
+                status: .inProgress
+            )
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            try encoder.encode([inProgressRec]).write(to: preCrashStore.ledgerFileURL, options: .atomic)
+
+            return (agentsDir, vaultDir, canonicalPlistPath, snapURL, originalBytes)
+        }
+
+        // Case A (bootstrap exits 0): must call launchctl bootstrap gui/501 <plistPath>, check exit 0,
+        // and only then remove orphan backup and clear inProgress record!
+        do {
+            let stateA = try stagePostBootoutCrashState(caseName: "caseA")
+            let okRecoveryMock = ProgrammableLaunchctlMock()
+            okRecoveryMock.bootstrapResult = LaunchctlResult(exitCode: 0)
+            let okRecoveryStore = FreezeLedgerStore(
+                vaultDirectory: stateA.vaultDir,
+                userLaunchAgentsDirectory: stateA.agentsDir,
+                uid: 501,
+                launchctlExecutor: okRecoveryMock
+            )
+
+            let summary = try okRecoveryStore.recoverInterruptedAndOrphanBackups()
+            #expect(okRecoveryMock.calls == [["bootstrap", "gui/501", stateA.canonicalPlistPath]])
+            #expect(summary.recoveredInProgressLabels == ["io.test.l14crash"])
+            #expect(fm.fileExists(atPath: stateA.canonicalPlistPath))
+            #expect(try Data(contentsOf: URL(fileURLWithPath: stateA.canonicalPlistPath)) == stateA.originalBytes)
+            #expect(!fm.fileExists(atPath: stateA.snapURL.path))
+            #expect(okRecoveryStore.loadRecords().isEmpty)
+            #expect(!okRecoveryStore.auditInterruptedTransactionsAndOrphanBackups().hasIssues)
+        }
+
+        // Case B (bootstrap exits non-zero, e.g. 5): must NOT silently wipe recovery record or backup!
+        do {
+            let stateB = try stagePostBootoutCrashState(caseName: "caseB")
+            let failRecoveryMock = ProgrammableLaunchctlMock()
+            failRecoveryMock.bootstrapResult = LaunchctlResult(exitCode: 5, stderr: "Bootstrap failed: 5: Input/output error")
+            let failRecoveryStore = FreezeLedgerStore(
+                vaultDirectory: stateB.vaultDir,
+                userLaunchAgentsDirectory: stateB.agentsDir,
+                uid: 501,
+                launchctlExecutor: failRecoveryMock
+            )
+
+            var caughtRecoveryError: FreezeError?
+            do {
+                _ = try failRecoveryStore.recoverInterruptedAndOrphanBackups()
+            } catch let err as FreezeError {
+                caughtRecoveryError = err
+            }
+            #expect(failRecoveryMock.calls == [["bootstrap", "gui/501", stateB.canonicalPlistPath]])
+            #expect(fm.fileExists(atPath: stateB.canonicalPlistPath))
+            #expect(fm.fileExists(atPath: stateB.snapURL.path))
+            #expect(failRecoveryStore.loadRecords().count == 1)
+            #expect(failRecoveryStore.loadRecords().first?.status == .inProgress)
+            #expect(failRecoveryStore.auditInterruptedTransactionsAndOrphanBackups().hasIssues)
+            let recoveryErr = try #require(caughtRecoveryError)
+            #expect(recoveryErr.localizedMessage(AppLocalizer(fixedLanguage: .en)).contains("exit code 5"))
+            #expect(recoveryErr.localizedMessage(AppLocalizer(fixedLanguage: .zhHans)).contains("退出码 5"))
+        }
     }
 }

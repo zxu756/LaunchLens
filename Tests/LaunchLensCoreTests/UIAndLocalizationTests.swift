@@ -2,6 +2,22 @@ import Foundation
 import Testing
 @testable import LaunchLensCore
 
+private final class InMemoryPreferenceStore: PreferenceStoring {
+    var values: [String: String] = [:]
+
+    func string(forKey defaultName: String) -> String? {
+        values[defaultName]
+    }
+
+    func set(_ value: Any?, forKey defaultName: String) {
+        if let str = value as? String {
+            values[defaultName] = str
+        } else if value == nil {
+            values.removeValue(forKey: defaultName)
+        }
+    }
+}
+
 @Suite("UIAndLocalizationTests", .timeLimit(.minutes(1)))
 struct UIAndLocalizationTests {
 
@@ -22,14 +38,12 @@ struct UIAndLocalizationTests {
     @Test("Toggles live between zh-Hans and en and localizes freeze banners")
     @MainActor
     func testLanguageToggleAndBannerLocalization() throws {
-        let suiteName = "launchlens.i18n.toggle.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaults = InMemoryPreferenceStore()
 
         let key = "local.xu.LaunchLens.language"
         let localizer = AppLocalizer(
             arguments: ["LaunchLens"],
-            userDefaults: defaults,
+            preferenceStore: defaults,
             preferenceKey: key,
             preferredLanguages: ["en-US"]
         )
@@ -50,17 +64,15 @@ struct UIAndLocalizationTests {
         #expect(LaunchFilterTab.frozenVault.localizedTitle(localizer) == "冻结保险库")
     }
 
-    @Test("Auto-detects Chinese system locale and respects UserDefaults & --lang flag")
+    @Test("Auto-detects Chinese system locale and respects preference store & --lang flag")
     @MainActor
     func testChineseLocaleAutoDetectAndCLIFlag() throws {
-        let suiteName = "launchlens.i18n.cli.\(UUID().uuidString)"
-        let defaults = try #require(UserDefaults(suiteName: suiteName))
-        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let defaults = InMemoryPreferenceStore()
 
         let key = "local.xu.LaunchLens.language"
         let autoZH = AppLocalizer(
             arguments: ["LaunchLens"],
-            userDefaults: defaults,
+            preferenceStore: defaults,
             preferenceKey: key,
             preferredLanguages: ["zh-Hans-CN", "en-US"]
         )
@@ -69,7 +81,7 @@ struct UIAndLocalizationTests {
         defaults.set("en", forKey: key)
         let savedEN = AppLocalizer(
             arguments: ["LaunchLens"],
-            userDefaults: defaults,
+            preferenceStore: defaults,
             preferenceKey: key,
             preferredLanguages: ["zh-Hans-CN"]
         )
@@ -77,7 +89,7 @@ struct UIAndLocalizationTests {
 
         let cliZH = AppLocalizer(
             arguments: ["LaunchLens", "--lang", "zh"],
-            userDefaults: defaults,
+            preferenceStore: defaults,
             preferenceKey: key,
             preferredLanguages: ["en-US"]
         )
@@ -165,6 +177,7 @@ struct UIAndLocalizationTests {
         let monitor = LaunchLensMonitor(
             snapshot: initialSnap,
             ledgerStore: store,
+            plistDirectories: [(agentsDir, .userAgent)],
             isStaticPreview: false,
             autoRefreshSeconds: nil
         )
@@ -258,6 +271,7 @@ struct UIAndLocalizationTests {
         let monitor = LaunchLensMonitor(
             snapshot: LaunchSnapshot(capturedAt: Date(), items: [], frozenRecords: []),
             ledgerStore: store,
+            plistDirectories: [(agentsDir, .userAgent)],
             isStaticPreview: false,
             autoRefreshSeconds: nil
         )

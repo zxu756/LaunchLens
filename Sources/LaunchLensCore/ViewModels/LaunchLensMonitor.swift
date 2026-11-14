@@ -148,15 +148,18 @@ public final class LaunchLensMonitor: ObservableObject {
 
     public let isStaticPreview: Bool
     public let ledgerStore: FreezeLedgerStore
+    private let customPlistDirectories: [(URL, ServiceDomain)]?
     private var refreshTimer: Timer?
 
     public init(
         snapshot: LaunchSnapshot? = nil,
         ledgerStore: FreezeLedgerStore = FreezeLedgerStore(),
+        plistDirectories: [(URL, ServiceDomain)]? = nil,
         isStaticPreview: Bool = false,
         autoRefreshSeconds: TimeInterval? = 10.0
     ) {
         self.ledgerStore = ledgerStore
+        self.customPlistDirectories = plistDirectories
         self.isStaticPreview = isStaticPreview
         if let snapshot {
             self.snapshot = snapshot
@@ -164,7 +167,7 @@ public final class LaunchLensMonitor: ObservableObject {
                 ? LedgerIntegrityReport()
                 : ledgerStore.auditInterruptedTransactionsAndOrphanBackups()
         } else {
-            self.snapshot = LaunchScanner.scanLiveHost(ledgerStore: ledgerStore)
+            self.snapshot = LaunchScanner.scanLiveHost(ledgerStore: ledgerStore, plistDirectories: plistDirectories)
             self.integrityReport = ledgerStore.auditInterruptedTransactionsAndOrphanBackups()
         }
 
@@ -179,7 +182,7 @@ public final class LaunchLensMonitor: ObservableObject {
 
     public func refresh() {
         guard !isStaticPreview else { return }
-        snapshot = LaunchScanner.scanLiveHost(ledgerStore: ledgerStore)
+        snapshot = LaunchScanner.scanLiveHost(ledgerStore: ledgerStore, plistDirectories: customPlistDirectories)
         integrityReport = ledgerStore.auditInterruptedTransactionsAndOrphanBackups()
     }
 

@@ -93,6 +93,7 @@ public enum FreezeError: LocalizedError, Equatable {
     case recordNotFound(String)
     case restoreTargetConflict(RestoreConflictSummary)
     case bootstrapFailed(label: String, exitCode: Int32, stderr: String, snapshotPath: String)
+    case recoveryBootstrapFailed(label: String, exitCode: Int32, stderr: String, plistPath: String, snapshotPath: String)
     case restoreWriteFailed(label: String, detail: String)
 
     public var errorDescription: String? {
@@ -136,6 +137,9 @@ public enum FreezeError: LocalizedError, Equatable {
         case let .bootstrapFailed(label, exitCode, stderr, snapshotPath):
             let errNote = stderr.isEmpty ? "no stderr" : stderr
             return "[Restore Step 3/4 launchctl bootstrap] bootstrap failed for '\(label)' with exit code \(exitCode) (\(errNote)). State: newly placed target copy removed; verified backup (\(snapshotPath)) and frozen ledger record preserved."
+        case let .recoveryBootstrapFailed(label, exitCode, stderr, plistPath, snapshotPath):
+            let errNote = stderr.isEmpty ? "no stderr" : stderr
+            return "[Startup Recovery launchctl bootstrap] bootstrap failed for '\(label)' with exit code \(exitCode) (\(errNote)). State: plist (\(plistPath)), verified backup (\(snapshotPath)), and inProgress recovery record preserved."
         case let .restoreWriteFailed(label, detail):
             return "[Restore Step 2/4 Write Target] Failed writing restored plist for '\(label)' (\(detail)). State: backup and frozen ledger record preserved."
         }
@@ -236,6 +240,12 @@ public enum FreezeError: LocalizedError, Equatable {
             return localizer.L(
                 self.errorDescription ?? "",
                 "[恢复步骤 3/4 launchctl bootstrap] 重新加载「\(label)」失败，退出码 \(exitCode)（\(errNote)）。当前状态：已移除刚放置的副本，完整保留备份文件（\(snapshotPath)）与台账记录。"
+            )
+        case let .recoveryBootstrapFailed(label, exitCode, stderr, plistPath, snapshotPath):
+            let errNote = stderr.isEmpty ? "无错误输出" : stderr
+            return localizer.L(
+                self.errorDescription ?? "",
+                "[启动恢复 launchctl bootstrap] 重新加载「\(label)」失败，退出码 \(exitCode)（\(errNote)）。当前状态：配置文件（\(plistPath)）、备份文件（\(snapshotPath)）与「进行中」恢复记录均完整保留。"
             )
         case let .restoreWriteFailed(label, detail):
             return localizer.L(
@@ -682,6 +692,7 @@ public final class FreezeLedgerStore: @unchecked Sendable {
 
         // 1. Recover any interrupted "inProgress" transactions without losing service or plist
         var updatedRecords: [FreezeSnapshotRecord] = []
+        var firstRecoveryError: FreezeError?
         for var rec in records {
             guard rec.status == .inProgress else {
                 updatedRecords.append(rec)
@@ -695,10 +706,27 @@ public final class FreezeLedgerStore: @unchecked Sendable {
             if fm.fileExists(atPath: dstURL.path),
                let dstBytes = try? Data(contentsOf: dstURL),
                Self.sha256Hex(dstBytes) == rec.sha256Hex {
-                // Original plist is already intact in LaunchAgents; clean temporary inProgress artifacts
-                try? fm.removeItem(at: snapURL)
-                if let stagedURL { try? fm.removeItem(at: stagedURL) }
-                recoveredInProgress.append(rec.label)
+                // Original plist is still in LaunchAgents matching backup bytes, which also occurs when
+                // a crash happens AFTER Step 4 (launchctl bootout unloaded the service) and BEFORE Step 5
+                // (moving the plist to Staged/). Re-run launchctl bootstrap and verify exitCode == 0
+                // before removing the backup or clearing the inProgress record.
+                let res = launchctlExecutor.runLaunchctl(["bootstrap", "gui/\(uid)", dstURL.path])
+                if res.exitCode == 0 {
+                    try? fm.removeItem(at: snapURL)
+                    if let stagedURL { try? fm.removeItem(at: stagedURL) }
+                    recoveredInProgress.append(rec.label)
+                } else {
+                    updatedRecords.append(rec)
+                    if firstRecoveryError == nil {
+                        firstRecoveryError = .recoveryBootstrapFailed(
+                            label: rec.label,
+                            exitCode: res.exitCode,
+                            stderr: res.stderr,
+                            plistPath: dstURL.path,
+                            snapshotPath: snapURL.path
+                        )
+                    }
+                }
             } else if let sourceBytes = (try? Data(contentsOf: snapURL)) ?? stagedURL.flatMap({ try? Data(contentsOf: $0) }),
                       Self.sha256Hex(sourceBytes) == rec.sha256Hex {
                 // Ensure verified backup sits in Snapshots, restore to LaunchAgents, and bootstrap
@@ -715,13 +743,17 @@ public final class FreezeLedgerStore: @unchecked Sendable {
                         if let stagedURL { try? fm.removeItem(at: stagedURL) }
                         recoveredInProgress.append(rec.label)
                     } else {
-                        // Keep safe in vault as .frozen so user can restore manually without losing bytes
                         try? fm.removeItem(at: dstURL)
-                        if let stagedURL { try? fm.removeItem(at: stagedURL) }
-                        rec.status = .frozen
-                        rec.stagedPlistPath = nil
                         updatedRecords.append(rec)
-                        recoveredInProgress.append(rec.label)
+                        if firstRecoveryError == nil {
+                            firstRecoveryError = .recoveryBootstrapFailed(
+                                label: rec.label,
+                                exitCode: res.exitCode,
+                                stderr: res.stderr,
+                                plistPath: dstURL.path,
+                                snapshotPath: snapURL.path
+                            )
+                        }
                     }
                 } else {
                     // Different file already exists at dstURL: promote backup to .frozen so user can inspect conflict diff
@@ -804,6 +836,10 @@ public final class FreezeLedgerStore: @unchecked Sendable {
 
         if !recoveredInProgress.isEmpty || !adoptedOrphans.isEmpty || fm.fileExists(atPath: ledgerFileURL.path) {
             try saveRecords(records, invokeHook: false)
+        }
+
+        if let firstRecoveryError {
+            throw firstRecoveryError
         }
 
         return LedgerRecoverySummary(

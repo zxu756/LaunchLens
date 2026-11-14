@@ -1,4 +1,4 @@
-# LaunchLens `v0.2.0` (`m0/honest`)
+# LaunchLens
 
 **English** | **[简体中文](README.zh-CN.md)**
 
@@ -12,16 +12,16 @@ Developers on macOS accumulate background `LaunchAgents`, global/system `launchd
 
 **LaunchLens** is a pure-SwiftPM macOS 14+ utility (main ledger window, menu bar popover, and headless CLI) with live `中文 / EN` switching, zero third-party dependencies, zero `sudo` prompts, and zero network calls.
 
-> **Upgrade Check for `v0.1.0` / `v0.2.0` Users:** Earlier builds deleted the active `.plist` before persisting `ledger.json` and ignored non-zero `launchctl` exit codes. After updating, run `build/LaunchLens.app/Contents/MacOS/LaunchLens --cli audit` (or launch the app) to automatically detect any interrupted `"inProgress"` entries or untracked `.plist` backups in `~/Library/Application Support/LaunchLens/Snapshots/` and recover them via **Repair / Recover**.
+> **Version Status (`v0.2.0` vs Unreleased after `v0.2.0`):** Published `v0.2.0` (`main`) ships the bilingual main window, menu bar popover, and `--cli list|orphans|frozen` (`--lang en|zh`). Items marked **Unreleased (after `v0.2.0`)** below — including the 6-step rollback-safe `freeze` transaction, conflict-checked `restore`, startup integrity recovery, command confirmation sheet, `--demo` preview switch, and CLI `--cli audit`, `--help` / `-h`, `--agents-dir`, `--ledger-dir`, and exit codes `1`/`2` — exist in source after `v0.2.0` and are not yet part of the published Homebrew Cask binary.
 
-## Verified Capabilities (`m0/honest`)
+## Verified Capabilities
 
-- **Plist Inventory & User-Domain RSS Correlation**: Scans `~/Library/LaunchAgents`, `/Library/LaunchAgents`, and `/Library/LaunchDaemons`, correlating user-domain `launchctl list` PIDs with `ps` resident memory (`RSS`) and `lsof` listening TCP ports.
-- **Rollback-Safe 6-Step `freeze` Transaction**: Validates that the target is a regular file (rejecting symlinks and duplicate labels) strictly inside `~/Library/LaunchAgents`, writes and SHA-256 verifies the backup in `Snapshots/`, persists an `"inProgress"` ledger entry *before* calling `/bin/launchctl bootout gui/<uid>`, checks `exitCode == 0`, moves the `.plist` to staging rather than deleting it, and commits `"frozen"` (rolling back in reverse order on any step failure).
-- **Conflict-Checked `restore`**: Verifies backup SHA-256 before writing, refuses silent overwrite when a modified file already exists at the target path (reporting both file paths, byte sizes, SHA-256 prefixes, and a PropertyList/line diff), verifies `/bin/launchctl bootstrap` `exitCode == 0`, and preserves both backup and ledger record if `bootstrap` fails.
-- **Command Confirmation & Startup Integrity Audit**: Freezing and restoring in both the main window and menu bar popover display a confirmation sheet showing the exact `/bin/launchctl` command and file paths. Startup checks surface `"inProgress"` transactions and orphaned backups with a lossless **Repair / Recover** action.
-- **Read-Only System & Orphan Boundaries**: `/Library/LaunchDaemons`, `/Library/LaunchAgents`, and `com.apple.*` items are strictly read-only. Orphaned process rows are also read-only in M0 (no terminate button in UI).
-- **Live `中文 / EN` UI & Headless CLI**: Supports automatic locale detection, in-app `中文 | EN` toggle (`⇧⌘L`), and `--lang en|zh` on the CLI with deterministic exit codes (`0` success, `1` runtime/audit error, `2` unknown subcommand or flag).
+- **Plist Inventory & User-Domain RSS Correlation (`v0.2.0`)**: Scans `~/Library/LaunchAgents`, `/Library/LaunchAgents`, and `/Library/LaunchDaemons`, correlating user-domain `launchctl list` PIDs with `ps` resident memory (`RSS`) and `lsof` listening TCP ports.
+- **Rollback-Safe 6-Step `freeze` Transaction (`Unreleased, after v0.2.0`)**: Validates that the target is a regular file (rejecting symlinks and duplicate labels) strictly inside `~/Library/LaunchAgents`, writes and SHA-256 verifies the backup in `Snapshots/`, persists an `"inProgress"` ledger entry (verifying ledger directory and file writability) *before* calling `/bin/launchctl bootout gui/<uid>`, checks `exitCode == 0`, moves the `.plist` to staging rather than deleting it, and commits `"frozen"` (rolling back in reverse order on any step failure).
+- **Conflict-Checked `restore` (`Unreleased, after v0.2.0`)**: Verifies backup SHA-256 before writing, refuses silent overwrite when a modified file already exists at the target path (reporting both file paths, byte sizes, SHA-256 prefixes, and a PropertyList/line diff), verifies `/bin/launchctl bootstrap` `exitCode == 0`, and preserves both backup and ledger record if `bootstrap` fails.
+- **Command Confirmation & Startup Integrity Recovery (`Unreleased, after v0.2.0`)**: Freezing and restoring in both the main window and menu bar popover display a confirmation sheet showing the exact `/bin/launchctl` command and file paths. Startup checks surface `"inProgress"` transactions and orphaned backups with a **Repair / Recover** action that re-runs `launchctl bootstrap` and verifies `exitCode == 0` before clearing interrupted records.
+- **Read-Only System & Orphan Boundaries (`Unreleased, after v0.2.0`)**: `/Library/LaunchDaemons`, `/Library/LaunchAgents`, and `com.apple.*` items are strictly read-only. Orphaned process rows are also read-only in M0 (no terminate button in UI).
+- **Live `中文 / EN` UI (`v0.2.0`) & Hardened Headless CLI (`Unreleased, after v0.2.0`)**: Supports automatic locale detection, in-app `中文 | EN` toggle (`⇧⌘L`), and `--lang en|zh` on the CLI with deterministic exit codes (`0` success, `1` runtime/audit error, `2` unknown subcommand or flag).
 
 <p align="center">
   <img src="docs/screenshot-menubar.png" width="420" alt="LaunchLens Menu Bar Popover (Synthetic Demo Preview)" />
@@ -29,7 +29,7 @@ Developers on macOS accumulate background `LaunchAgents`, global/system `launchd
 
 > **`[DEMO]` Menu Bar Caption:** Rendered from `LaunchLensMonitor.preview()` synthetic preview items (`--export-screenshots`).
 
-## Current M0 Scope Limits & Planned Work (`M1+`)
+## Current Scope Limits & Planned Work (`M1+`)
 
 ### M0 Measurement Scope Limits
 - **User-Domain `launchctl` RSS Scope (`L7`)**: Unprivileged `/bin/launchctl list` only reports PIDs in the current user GUI domain. Root/system-domain `LaunchDaemons` do not expose PIDs to unprivileged `launchctl list` (showing `Idle` / `0 MB` in M0), and child/helper processes not directly registered as a plist's `launchctl` PID are not yet summed into that service's RSS.
@@ -41,49 +41,56 @@ Developers on macOS accumulate background `LaunchAgents`, global/system `launchd
 
 ## Install & Build (macOS 14.0+, Apple Silicon)
 
-### Homebrew Cask (`v0.2.0`)
+### Homebrew Cask (`v0.2.0`, published release)
 
 ```bash
 brew install --cask zxu756/tap/launchlens
 ```
 
-### Build & Scoped Verification from Source
+### Build & Scoped Verification from Source (`Unreleased, after v0.2.0`)
 
 ```bash
 ./Scripts/test.sh scope Freeze Scanner CLI UI
 ./Scripts/build-app.sh
 ```
 
-After building, launch `build/LaunchLens.app` from Finder (or pass `--demo` to inspect the labeled synthetic preview dataset).
+After building, launch `build/LaunchLens.app` from Finder (or pass `--demo`, **Unreleased after `v0.2.0`**, to inspect the labeled synthetic preview dataset).
 
 ## Headless CLI Usage
 
-All commands below are read-only and verified in `Scripts/acceptance/readme-commands.sh`:
+### Isolated Fixture Verification (`Unreleased, after v0.2.0`)
+
+`--agents-dir`, `--ledger-dir`, `--cli audit`, and `--help` were added after `v0.2.0` so CLI checks can run hermetically without reading or touching `~/Library/LaunchAgents` (replayed in `Scripts/acceptance/readme-commands.sh`):
 
 ```bash
-# List non-Apple background services ranked by live RSS (English & Simplified Chinese)
+# List services and orphans against isolated directories (--agents-dir & --ledger-dir: Unreleased after v0.2.0)
+build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --agents-dir "${AGENTS_DIR:-.}" --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang en
+build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --agents-dir "${AGENTS_DIR:-.}" --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang zh
+build/LaunchLens.app/Contents/MacOS/LaunchLens --cli orphans --agents-dir "${AGENTS_DIR:-.}" --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang en
+build/LaunchLens.app/Contents/MacOS/LaunchLens --cli orphans --agents-dir "${AGENTS_DIR:-.}" --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang zh
+
+# Inspect SHA-256 verified frozen snapshots and run ledger audit (--cli audit & --help: Unreleased after v0.2.0)
+build/LaunchLens.app/Contents/MacOS/LaunchLens --cli frozen --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang en
+build/LaunchLens.app/Contents/MacOS/LaunchLens --cli frozen --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang zh
+build/LaunchLens.app/Contents/MacOS/LaunchLens --cli audit --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang en
+build/LaunchLens.app/Contents/MacOS/LaunchLens --cli audit --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang zh
+build/LaunchLens.app/Contents/MacOS/LaunchLens --help --lang en
+build/LaunchLens.app/Contents/MacOS/LaunchLens --help --lang zh
+```
+
+### Interactive Live-Host Inspection (Default `~/Library/LaunchAgents`)
+
+Omitting `--agents-dir` scans your live `~/Library/LaunchAgents`, `/Library/LaunchAgents`, and `/Library/LaunchDaemons` (read-only; skipped in `milestone 0` acceptance and executed in `release` mode only):
+
+```bash
+# Scan live host LaunchAgents and background RSS (interactive use / release mode)
 build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang en
 build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang zh
-
-# List detected PPID==1 orphan candidates (read-only)
-build/LaunchLens.app/Contents/MacOS/LaunchLens --cli orphans --lang en
-build/LaunchLens.app/Contents/MacOS/LaunchLens --cli orphans --lang zh
-
-# Inspect SHA-256 verified frozen LaunchAgents (supports --ledger-dir for isolated vaults)
-build/LaunchLens.app/Contents/MacOS/LaunchLens --cli frozen --lang en
-build/LaunchLens.app/Contents/MacOS/LaunchLens --cli frozen --lang zh
-
-# Audit ledger integrity for interrupted inProgress records or orphaned backup plists
-build/LaunchLens.app/Contents/MacOS/LaunchLens --cli audit --lang en
-build/LaunchLens.app/Contents/MacOS/LaunchLens --cli audit --lang zh
-
-# Display CLI usage and flags
-build/LaunchLens.app/Contents/MacOS/LaunchLens --help --lang en
 ```
 
 ## Architecture & Specification
 
-See [docs/SPEC.md](docs/SPEC.md) for the 6-step freeze transaction, restore conflict handling, and CLI exit code contract.
+See [docs/SPEC.md](docs/SPEC.md) for the 6-step freeze transaction, restore conflict handling, startup recovery, and CLI exit code contract.
 
 ## License
 
