@@ -7,20 +7,21 @@ LaunchLens is a local, zero-network SwiftPM macOS 14+ application (main ledger w
 1. **Strict Path Containment (`L8`)**: `FreezeLedgerStore.freeze` checks `lstat(2)` before symlink resolution, rejects symbolic links and non-regular files, resolves the canonical parent directory, and requires strict containment inside `userLaunchAgentsDirectory` (`~/Library/LaunchAgents` by default). Duplicate freezes for an existing `label` are rejected without touching existing snapshots.
 2. **Read-Only System Boundaries**: `/Library/LaunchDaemons`, `/Library/LaunchAgents`, and `com.apple.*` items are read-only in both UI and `FreezeLedgerStore`; LaunchLens never invokes `sudo`.
 3. **Zero Network Access**: `Sources/` contains zero network calls or telemetry.
-4. **Transactional 6-Step Freeze (`L1, L2`)**:
-   - Step 1: Validate domain, non-Apple prefix, `lstat` regular-file check, canonical `LaunchAgents` containment, and duplicate `label` check.
+4. **Transactional 6-Step Freeze (`L1, L2, L13, L19`)**:
+   - Step 1: Validate domain, non-Apple prefix, `lstat` regular-file check, canonical `LaunchAgents` containment, duplicate `label` check, and vault directory / subdirectory / `ledger.json` writability preflight *before* creating any directory or writing any backup file.
    - Step 2: Write byte-exact `.plist` backup into `Snapshots/` and verify read-back SHA-256.
-   - Step 3: Write an `"inProgress"` (`进行中`) record to `ledger.json` and verify ledger directory and file writability on disk *before* calling `launchctl bootout` or touching the user's `.plist`.
+   - Step 3: Write an `"inProgress"` (`进行中`) record to `ledger.json` (re-verifying writability) *before* calling `launchctl bootout` or touching the user's `.plist`.
    - Step 4: Execute `/bin/launchctl bootout gui/<uid> <plist>` via `LaunchctlExecuting` and require `exitCode == 0`. On non-zero exit, clean the `"inProgress"` record and backup, leaving the original `.plist` untouched.
    - Step 5: Move (never delete) the active `.plist` into `Staged/` next to `Snapshots/`. If moving fails, run `launchctl bootstrap` rollback and clean temporary artifacts.
    - Step 6: Update the ledger entry from `"inProgress"` to `"frozen"` (`已冻结`) and remove the staged duplicate. If the final ledger commit fails, move the staged `.plist` back to `~/Library/LaunchAgents` and re-run `launchctl bootstrap`.
-5. **Safe Restore & Conflict Detection (`L2, L3`)**:
+5. **Safe Restore & Conflict Detection (`L2, L3, L19`)**:
    - Verifies backup SHA-256 before writing anything or calling `bootstrap`.
    - Checks `lstat(2)` at `originalPlistPath`: if a file already exists (for example, recreated by an app update), `restore` refuses silent overwrite and reports both paths, byte sizes, SHA-256 digests, and a PropertyList/line diff so the user can choose explicitly.
+   - Preflights vault directory and `ledger.json` writability before writing the target `.plist` or invoking `launchctl bootstrap`.
    - Runs `/bin/launchctl bootstrap gui/<uid> <plist>` and requires `exitCode == 0`. On non-zero exit, removes the newly placed target copy while preserving both the verified backup file and the `.frozen` ledger record.
-6. **Startup Integrity Check & Recovery (M0 Item 3, `L14`)**:
+6. **Startup Integrity Check & Recovery (M0 Item 3, `L14, L16, L17`)**:
    - On startup (`LaunchLensMonitor.init`), `--cli audit`, and rescan, `auditInterruptedTransactionsAndOrphanBackups()` detects `"inProgress"` records, untracked `.plist` files in `Snapshots/` or `Staged/`, missing backup files, or corrupted ledger JSON, surfacing a `Repair / Recover` (`修复 / 恢复`) flow.
-   - During `recoverInterruptedAndOrphanBackups()`, even when the original `.plist` is still in `LaunchAgents` matching the backup SHA-256 (such as a crash after `launchctl bootout` and before moving the `.plist`), recovery executes `/bin/launchctl bootstrap gui/<uid> <plist>` and checks `exitCode == 0` before deleting the backup or clearing the `"inProgress"` record; if `bootstrap` exits non-zero, recovery preserves the `.plist`, backup, and `"inProgress"` record and reports a `FreezeError.recoveryBootstrapFailed` error.
+   - During `recoverInterruptedAndOrphanBackups()`, when the original `.plist` is still in `LaunchAgents` matching the backup SHA-256 (Branch 1), recovery first runs read-only `/bin/launchctl print gui/<uid>/<label>`: if `exitCode == 0` (interrupted before `bootout`, service still loaded), it skips `bootstrap` and cleans temporary backup/staged files; if `exitCode != 0` (interrupted after `bootout` before moving the `.plist`), it executes `/bin/launchctl bootstrap gui/<uid> <plist>` and checks `exitCode == 0` before deleting the backup or clearing `"inProgress"` (preserving the `.plist`, backup, and `"inProgress"` record with `FreezeError.recoveryBootstrapFailed` on non-zero exit). When the `.plist` was already moved out of `LaunchAgents` and sits in `Snapshots/`/`Staged/` (Branch 2), recovery copies it back and runs `bootstrap`; if `bootstrap` exits non-zero, it removes the unbootstrapped destination copy and downgrades the record to `.frozen` so the user can inspect or restore manually.
 7. **Command Confirmation & Read-Only Orphans (`L5, L6`)**:
    - Freezing and restoring in both the main window and menu bar popover open an explicit confirmation sheet displaying the exact `/bin/launchctl` command and file paths.
    - Orphan daemon rows are strictly read-only in M0 (no process-termination UI button).

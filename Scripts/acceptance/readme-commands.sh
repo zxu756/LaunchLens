@@ -218,11 +218,11 @@ for idx, cmd in enumerate(en_cmds, start=1):
     executed_count += 1
 
 print("")
-print(f"[Summary] mode={mode} total={len(en_cmds)} executed={executed_count} skipped={skipped_count}")
+print(f"[Summary] mode={mode} total={len(en_cmds)} passed={executed_count} skipped={skipped_count}")
 PYEOF
 
     echo "================================================================"
-    echo "ALL README & README.zh-CN COMMAND CHECKS SUCCEEDED (EXIT 0)"
+    echo "EXECUTED README COMMAND CHECKS PASSED; SKIPPED CHECKS COUNTED SEPARATELY (EXIT 0)"
     echo "================================================================"
 } > "$RAW_REPORT"
 

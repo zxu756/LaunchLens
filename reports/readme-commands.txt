@@ -12,12 +12,12 @@ SKIPPED (external Homebrew Cask install requires network and modifies /Applicati
     ↳ Testing Library Version: 2403
     ↳ Target Platform: arm64e-apple-macos14.0
     ◇ Suite "CLIRunnerTests" started.
-    ... (69 lines omitted) ...
+    ... (77 lines omitted) ...
     [6 / 11] LaunchLensCoreTests-product
     [7 / 15]
     [10 / 15] LaunchLensCoreTests-product
     [17 / 18] LaunchLensCoreTests-product
-    Build complete! (1.44秒)
+    Build complete! (2.25秒)
     [ASSERT PASS] exit=0, verified output pattern (exact_all)
 
 ==> [3/15] ./Scripts/build-app.sh
@@ -26,9 +26,7 @@ SKIPPED (external Homebrew Cask install requires network and modifies /Applicati
     [Planning deferred tasks]
     [2 / 10]
     [3 / 11] LaunchLensCore
-    [5 / 12] LaunchLensCore
-    Build complete! (6.45秒)
-    ==> Assembling <REPO_ROOT>/build/LaunchLens.app...
+    ... (7 lines omitted) ...
     ==> Generating AppIcon.icns...
     ==> Ad-hoc signing & verifying...
     ✓ Built <REPO_ROOT>/build/LaunchLens.app
@@ -84,7 +82,7 @@ SKIPPED in milestone 0 (reads host ~/Library/LaunchAgents; runs in release mode 
 ==> [15/15] build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang zh
 SKIPPED in milestone 0 (reads host ~/Library/LaunchAgents; runs in release mode only): build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang zh
 
-[Summary] mode=milestone0 total=15 executed=12 skipped=3
+[Summary] mode=milestone0 total=15 passed=12 skipped=3
 ================================================================
-ALL README & README.zh-CN COMMAND CHECKS SUCCEEDED (EXIT 0)
+EXECUTED README COMMAND CHECKS PASSED; SKIPPED CHECKS COUNTED SEPARATELY (EXIT 0)
 ================================================================

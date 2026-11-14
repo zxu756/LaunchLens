@@ -3,25 +3,29 @@ LaunchLens M0 Acceptance Suite (Hermetic Temp Dir + Fake launchctl)
 ================================================================
 [Info] SwiftPM package dependency identity: LaunchLens
 [Setup] Building LaunchLens executable...
-[Rows 1-6 + L14] Compiling & executing hermetic library probe...
+[Rows 1-6 + L14/L16/L17] Compiling & executing hermetic library probe...
 [Row 1 PASS] Fake bootout exit=36 -> threw error (EN/ZH), plist intact, 0 ledger records, 0 orphan backups.
-[Row 2 PASS] Read-only 0444 ledger.json & 0555 ledger directory (L13) -> threw error (EN/ZH), 0 launchctl calls, original plist intact.
+[Row 2 PASS] Read-only 0444 ledger.json & 0555 ledger directory (L13/L19) -> threw error, 0 vault writes, 0 launchctl calls, original plist intact.
 [Row 3 PASS] Fake bootstrap exit=5 -> threw error (EN/ZH), backup file & ledger record both preserved.
 [Row 4 PASS] Target file conflict -> did NOT overwrite, preserved backup & record, reported both paths & diff (EN/ZH).
 [Row 5 PASS] 1-byte tampered backup -> rejected immediately (SHA-256 mismatch), 0 writes, 0 bootstrap calls.
 [Row 6 PASS] File outside LaunchAgents -> rejected with outsideLaunchAgentsDirectory, file untouched.
-[L14 PASS] Post-bootout crash recovery re-runs launchctl bootstrap, preserves state on non-zero exit, and clears record on exit 0.
+[L14 PASS] Post-bootout crash recovery runs print pre-check, re-runs launchctl bootstrap, preserves state on non-zero exit, and clears record on exit 0.
+[L16 PASS] Pre-bootout crash recovery (print=0, bootstrap=5 via fake launchctl) skips bootstrap, cleans vault backup, and clears inProgress.
+[L17 PASS] Branch-2 failed-bootstrap recovery removes partial copy, preserves snapshot, downgrades to .frozen, and allows clean restore.
 [Row 7 PASS] LaunchLens --cli nosuchcmd --lang en -> exit code 2, stderr: Error: Unknown CLI subcommand 'nosuchcmd'. Supported subcommands: list, orphans, frozen, audit.
 [Row 7 PASS] LaunchLens --cli nosuchcmd --lang zh -> exit code 2, stderr: 错误：未知的命令行子命令「nosuchcmd」。支持的子命令：list、orphans、frozen、audit。
 [Row 8 / W1] Pre-warming isolated test build in temp workspace...
 [Row 8 / W1 PASS] M1 (Row 8: delete restore SHA-256 check) -> compiled, ran, and failed named test 'FreezeLedgerTests/testCorruptedSnapshotRejectedOnRestore' (exit 1).
-[Row 8 / W1 PASS] M2 (L13 & Row 2: bypass pre-bootout Step 3 ledger write) -> compiled, ran, and failed named test 'FreezeLedgerTests/testReadOnlyLedgerDirectoryAbortsBeforeBootout' (exit 1).
+[Row 8 / W1 PASS] M2 (L19 & L13 & Row 2: bypass Step 1 vault writability preflight check in freeze) -> compiled, ran, and failed named test 'FreezeLedgerTests/testReadOnlyLedgerDirectoryAbortsBeforeBootout' (exit 1).
 [Row 8 / W1 PASS] M3 (Row 2: delete 0444 read-only ledgerFileURL guard) -> compiled, ran, and failed named test 'FreezeLedgerTests/testUnwritableLedgerAbortsBeforeBootout' (exit 1).
 [Row 8 / W1 PASS] M4 (Row 1: ignore non-zero launchctl bootout exit code) -> compiled, ran, and failed named test 'FreezeLedgerTests/testNonZeroBootoutRollsBackCleanly' (exit 1).
 [Row 8 / W1 PASS] M5 (Row 3: ignore non-zero launchctl bootstrap exit code on restore) -> compiled, ran, and failed named test 'FreezeLedgerTests/testNonZeroBootstrapPreservesBackupAndLedgerRecord' (exit 1).
 [Row 8 / W1 PASS] M6 (L14: skip launchctl bootstrap during post-bootout crash recovery) -> compiled, ran, and failed named test 'FreezeLedgerTests/testCrashAfterBootoutBeforeMoveRebootstrapsAndChecksExitCode' (exit 1).
 [Row 8 / W1 PASS] M7 (L10: weaken orphan PPID == 1 guard to true) -> compiled, ran, and failed named test 'ScannerCorrelationTests/testCorrelateAndOrphanDetection' (exit 1).
 [Row 8 / W1 PASS] M8 (L10: weaken orphan UID == currentUID guard to true) -> compiled, ran, and failed named test 'ScannerCorrelationTests/testCorrelateAndOrphanDetection' (exit 1).
+[Row 8 / W1 PASS] M9 (L16: skip launchctl print pre-check in Branch-1 recovery) -> compiled, ran, and failed named test 'FreezeLedgerTests/testL16Branch1RecoveryUsesFakeLaunchctlPrintPrecheck' (exit 1).
+[Row 8 / W1 PASS] M10 (L17: keep Branch-2 failed-bootstrap record stuck in .inProgress) -> compiled, ran, and failed named test 'FreezeLedgerTests/testL17Branch2BootstrapFailureDowngradesToFrozenCleanly' (exit 1).
 ================================================================
 ALL M0 ACCEPTANCE & W1 MUTATION CHECKS PASSED (EXIT 0)
 ================================================================

@@ -42,6 +42,50 @@ fi
 MODE="$1"
 shift
 
+print_stage_summary() {
+    local stage_label="$1"
+    local unit_log="$2"
+    local accept_log="$3"
+    local readme_log="$4"
+    local real_launchd_status="$5"
+
+    python3 - "$stage_label" "$unit_log" "$accept_log" "$readme_log" "$real_launchd_status" <<'PYEOF'
+import pathlib
+import re
+import sys
+
+label, unit_path, accept_path, readme_path, real_status = sys.argv[1:6]
+unit_text = pathlib.Path(unit_path).read_text(encoding="utf-8")
+accept_text = pathlib.Path(accept_path).read_text(encoding="utf-8")
+readme_text = pathlib.Path(readme_path).read_text(encoding="utf-8")
+
+unit_passed = len(re.findall(r'^\s*✔ Test "', unit_text, flags=re.MULTILINE))
+unit_skipped = len(re.findall(r'^\s*◇ Test ".*" skipped', unit_text, flags=re.MULTILINE))
+
+accept_passed = len(re.findall(r'^\[.*PASS\]', accept_text, flags=re.MULTILINE))
+accept_skipped = len(re.findall(r'^\[.*SKIPPED\]', accept_text, flags=re.MULTILINE))
+
+m = re.search(r'\[Summary\] mode=\S+ total=(\d+) passed=(\d+) skipped=(\d+)', readme_text)
+if not m:
+    sys.stderr.write("FAIL: Could not parse passed/skipped counts from readme-commands output.\n")
+    sys.exit(1)
+readme_passed = int(m.group(2))
+readme_skipped = int(m.group(3))
+
+total_passed = unit_passed + accept_passed + readme_passed
+total_skipped = unit_skipped + accept_skipped + readme_skipped + (1 if real_status.startswith("skipped") else 0)
+
+print(
+    f"==> [{label} Summary] "
+    f"unit_tests(passed={unit_passed}, skipped={unit_skipped}) | "
+    f"m0_acceptance(passed={accept_passed}, skipped={accept_skipped}) | "
+    f"readme_commands(passed={readme_passed}, skipped={readme_skipped}) | "
+    f"real_launchd={real_status} | "
+    f"totals(passed={total_passed}, skipped={total_skipped})"
+)
+PYEOF
+}
+
 case "$MODE" in
     scope)
         if [[ $# -lt 1 ]]; then
@@ -78,13 +122,16 @@ case "$MODE" in
         done
         case "$MS" in
             0|M0|m0)
+                SUMMARY_TMP="$(mktemp -d "${TMPDIR:-/tmp}/launchlens-test-summary.XXXXXX")"
+                trap 'rm -rf "$SUMMARY_TMP"' EXIT
                 swift build --product LaunchLens >/dev/null
                 echo "==> [M0] Running all M0 unit test scopes (Freeze, Scanner, CLI, UI)..."
-                swift test --no-parallel --filter "FreezeLedgerTests|ScannerCorrelationTests|CLIRunnerTests|UIAndLocalizationTests"
+                swift test --no-parallel --filter "FreezeLedgerTests|ScannerCorrelationTests|CLIRunnerTests|UIAndLocalizationTests" 2>&1 | tee "$SUMMARY_TMP/unit.log"
                 echo "==> [M0] Running Scripts/acceptance/m0-acceptance.sh..."
-                "$ROOT/Scripts/acceptance/m0-acceptance.sh" "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}"
+                "$ROOT/Scripts/acceptance/m0-acceptance.sh" "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}" 2>&1 | tee "$SUMMARY_TMP/accept.log"
                 echo "==> [M0] Running Scripts/acceptance/readme-commands.sh (milestone 0 isolated mode)..."
-                "$ROOT/Scripts/acceptance/readme-commands.sh" --mode milestone0 "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}"
+                "$ROOT/Scripts/acceptance/readme-commands.sh" --mode milestone0 "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}" 2>&1 | tee "$SUMMARY_TMP/readme.log"
+                print_stage_summary "M0" "$SUMMARY_TMP/unit.log" "$SUMMARY_TMP/accept.log" "$SUMMARY_TMP/readme.log" "not_applicable_in_m0"
                 ;;
             *)
                 echo "Error: Milestone '$MS' is not yet implemented (only milestone 0 is available)." >&2
@@ -105,13 +152,16 @@ case "$MODE" in
             esac
             shift
         done
+        SUMMARY_TMP="$(mktemp -d "${TMPDIR:-/tmp}/launchlens-release-summary.XXXXXX")"
+        trap 'rm -rf "$SUMMARY_TMP"' EXIT
         swift build --product LaunchLens >/dev/null
         echo "==> [Release] Running full unit test suite..."
-        swift test --no-parallel
+        swift test --no-parallel 2>&1 | tee "$SUMMARY_TMP/unit.log"
         echo "==> [Release] Running Scripts/acceptance/m0-acceptance.sh..."
-        "$ROOT/Scripts/acceptance/m0-acceptance.sh" "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}"
+        "$ROOT/Scripts/acceptance/m0-acceptance.sh" "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}" 2>&1 | tee "$SUMMARY_TMP/accept.log"
         echo "==> [Release] Running Scripts/acceptance/readme-commands.sh (release mode)..."
-        "$ROOT/Scripts/acceptance/readme-commands.sh" --mode release "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}"
+        "$ROOT/Scripts/acceptance/readme-commands.sh" --mode release "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}" 2>&1 | tee "$SUMMARY_TMP/readme.log"
+        REAL_STATUS="passed"
         if [[ "${LAUNCHLENS_REAL_LAUNCHD:-0}" == "1" ]]; then
             if [[ -x "$ROOT/Scripts/acceptance/m1-real-launchd.sh" ]]; then
                 "$ROOT/Scripts/acceptance/m1-real-launchd.sh"
@@ -121,7 +171,9 @@ case "$MODE" in
             fi
         else
             echo "Real launchd checks: SKIPPED (LAUNCHLENS_REAL_LAUNCHD!=1)"
+            REAL_STATUS="skipped(LAUNCHLENS_REAL_LAUNCHD!=1)"
         fi
+        print_stage_summary "Release" "$SUMMARY_TMP/unit.log" "$SUMMARY_TMP/accept.log" "$SUMMARY_TMP/readme.log" "$REAL_STATUS"
         ;;
     *)
         usage

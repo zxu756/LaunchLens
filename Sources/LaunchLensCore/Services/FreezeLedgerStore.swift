@@ -62,6 +62,8 @@ private struct ClosureLaunchctlExecutor: LaunchctlExecuting {
             return LaunchctlResult(exitCode: 2, stderr: "Invalid launchctl arguments")
         }
         switch sub {
+        case "print":
+            return LaunchctlResult(exitCode: 113, stderr: "Service not loaded")
         case "bootout":
             bootoutHandler(plistPath)
             return LaunchctlResult(exitCode: 0)
@@ -405,6 +407,18 @@ public final class FreezeLedgerStore: @unchecked Sendable {
             throw FreezeError.alreadyFrozen(label: item.label, status: duplicate.status)
         }
 
+        // Preflight vault & ledger writability BEFORE creating directories or writing any backup file (L19)
+        do {
+            try verifyVaultWritablePreflight(requireSubdirectoriesWritable: true)
+        } catch {
+            throw FreezeError.ledgerWriteFailed(
+                step: "Step 1/6 Vault Writability Preflight",
+                detail: error.localizedDescription,
+                stateSummaryEN: "No files written to vault, launchctl bootout was NOT called, and original plist remains untouched at \(canonicalSrcURL.path).",
+                stateSummaryZH: "未向保险库写入任何文件，未调用 launchctl bootout，原 plist 仍完好保留在 \(canonicalSrcURL.path)。"
+            )
+        }
+
         let fm = FileManager.default
         let rawBytes: Data
         do {
@@ -583,6 +597,16 @@ public final class FreezeLedgerStore: @unchecked Sendable {
             case .abort:
                 throw FreezeError.restoreTargetConflict(summary)
             case .keepExistingAndClearRecord:
+                do {
+                    try verifyVaultWritablePreflight(requireSubdirectoriesWritable: false)
+                } catch {
+                    throw FreezeError.ledgerWriteFailed(
+                        step: "Restore Preflight Vault Writability",
+                        detail: error.localizedDescription,
+                        stateSummaryEN: "Existing target file untouched, backup and ledger record preserved.",
+                        stateSummaryZH: "目标现有文件未改动，备份与台账记录已保留。"
+                    )
+                }
                 records.remove(at: idx)
                 try saveRecords(records)
                 try? fm.removeItem(at: snapURL)
@@ -591,10 +615,32 @@ public final class FreezeLedgerStore: @unchecked Sendable {
                 }
                 return
             case .overwriteExistingWithBackup:
+                do {
+                    try verifyVaultWritablePreflight(requireSubdirectoriesWritable: false)
+                } catch {
+                    throw FreezeError.ledgerWriteFailed(
+                        step: "Restore Preflight Vault Writability",
+                        detail: error.localizedDescription,
+                        stateSummaryEN: "Existing target file untouched, launchctl bootstrap was NOT called, and backup/ledger remain preserved.",
+                        stateSummaryZH: "目标现有文件未改动，未调用 launchctl bootstrap，备份与台账记录已保留。"
+                    )
+                }
                 overwrittenExistingBytes = existingData
                 if (dstStat.st_mode & S_IFMT) == S_IFLNK {
                     try? fm.removeItem(at: dstURL)
                 }
+            }
+        } else {
+            // Preflight vault & ledger writability BEFORE writing target plist or calling launchctl bootstrap
+            do {
+                try verifyVaultWritablePreflight(requireSubdirectoriesWritable: false)
+            } catch {
+                throw FreezeError.ledgerWriteFailed(
+                    step: "Restore Preflight Vault Writability",
+                    detail: error.localizedDescription,
+                    stateSummaryEN: "Target plist was NOT written, launchctl bootstrap was NOT called, and backup/ledger remain preserved.",
+                    stateSummaryZH: "未写入目标 plist，未调用 launchctl bootstrap，备份与台账记录已保留。"
+                )
             }
         }
 
@@ -706,25 +752,36 @@ public final class FreezeLedgerStore: @unchecked Sendable {
             if fm.fileExists(atPath: dstURL.path),
                let dstBytes = try? Data(contentsOf: dstURL),
                Self.sha256Hex(dstBytes) == rec.sha256Hex {
-                // Original plist is still in LaunchAgents matching backup bytes, which also occurs when
-                // a crash happens AFTER Step 4 (launchctl bootout unloaded the service) and BEFORE Step 5
-                // (moving the plist to Staged/). Re-run launchctl bootstrap and verify exitCode == 0
+                // Original plist is still in LaunchAgents matching backup bytes.
+                // Check via read-only `launchctl print gui/<uid>/<label>` whether the service is still loaded:
+                // - exitCode == 0: crash occurred BEFORE Step 4 `bootout` unloaded the service; skip `bootstrap`
+                //   (which would fail on an already-loaded service) and clean temporary artifacts.
+                // - exitCode != 0: crash occurred AFTER Step 4 `bootout` unloaded the service and BEFORE Step 5
+                //   moved the plist to Staged/; re-run `launchctl bootstrap` and verify exitCode == 0
                 // before removing the backup or clearing the inProgress record.
-                let res = launchctlExecutor.runLaunchctl(["bootstrap", "gui/\(uid)", dstURL.path])
-                if res.exitCode == 0 {
+                let printRes = launchctlExecutor.runLaunchctl(["print", "gui/\(uid)/\(rec.label)"])
+                if printRes.exitCode == 0 {
                     try? fm.removeItem(at: snapURL)
                     if let stagedURL { try? fm.removeItem(at: stagedURL) }
                     recoveredInProgress.append(rec.label)
                 } else {
-                    updatedRecords.append(rec)
-                    if firstRecoveryError == nil {
-                        firstRecoveryError = .recoveryBootstrapFailed(
-                            label: rec.label,
-                            exitCode: res.exitCode,
-                            stderr: res.stderr,
-                            plistPath: dstURL.path,
-                            snapshotPath: snapURL.path
-                        )
+                    // Service is NOT loaded: re-bootstrap before removing backup or clearing inProgress
+                    let res = launchctlExecutor.runLaunchctl(["bootstrap", "gui/\(uid)", dstURL.path])
+                    if res.exitCode == 0 {
+                        try? fm.removeItem(at: snapURL)
+                        if let stagedURL { try? fm.removeItem(at: stagedURL) }
+                        recoveredInProgress.append(rec.label)
+                    } else {
+                        updatedRecords.append(rec)
+                        if firstRecoveryError == nil {
+                            firstRecoveryError = .recoveryBootstrapFailed(
+                                label: rec.label,
+                                exitCode: res.exitCode,
+                                stderr: res.stderr,
+                                plistPath: dstURL.path,
+                                snapshotPath: snapURL.path
+                            )
+                        }
                     }
                 }
             } else if let sourceBytes = (try? Data(contentsOf: snapURL)) ?? stagedURL.flatMap({ try? Data(contentsOf: $0) }),
@@ -743,17 +800,17 @@ public final class FreezeLedgerStore: @unchecked Sendable {
                         if let stagedURL { try? fm.removeItem(at: stagedURL) }
                         recoveredInProgress.append(rec.label)
                     } else {
+                        // Branch 2: plist was already moved out of LaunchAgents prior to interruption.
+                        // Remove the unbootstrapped destination copy and downgrade to .frozen in the vault
+                        // so disk state matches .frozen and the user can inspect or restore manually.
                         try? fm.removeItem(at: dstURL)
-                        updatedRecords.append(rec)
-                        if firstRecoveryError == nil {
-                            firstRecoveryError = .recoveryBootstrapFailed(
-                                label: rec.label,
-                                exitCode: res.exitCode,
-                                stderr: res.stderr,
-                                plistPath: dstURL.path,
-                                snapshotPath: snapURL.path
-                            )
+                        if let stagedURL, stagedURL.standardizedFileURL != snapURL.standardizedFileURL {
+                            try? fm.removeItem(at: stagedURL)
                         }
+                        rec.status = .frozen
+                        rec.stagedPlistPath = nil
+                        updatedRecords.append(rec)
+                        recoveredInProgress.append(rec.label)
                     }
                 } else {
                     // Different file already exists at dstURL: promote backup to .frozen so user can inspect conflict diff
@@ -851,16 +908,7 @@ public final class FreezeLedgerStore: @unchecked Sendable {
 
     // MARK: - Persistence & Helpers
 
-    private func saveRecords(_ records: [FreezeSnapshotRecord], invokeHook: Bool = true) throws {
-        writeLock.lock()
-        writeCounter += 1
-        let seq = writeCounter
-        writeLock.unlock()
-
-        if invokeHook, let ledgerWriteHook {
-            try ledgerWriteHook(seq, records)
-        }
-
+    private func verifyVaultWritablePreflight(requireSubdirectoriesWritable: Bool) throws {
         let fm = FileManager.default
         var isDir: ObjCBool = false
         if fm.fileExists(atPath: vaultDirectory.path, isDirectory: &isDir) {
@@ -875,7 +923,39 @@ public final class FreezeLedgerStore: @unchecked Sendable {
                 ])
             }
         } else {
-            try fm.createDirectory(at: vaultDirectory, withIntermediateDirectories: true)
+            var ancestor = vaultDirectory.standardizedFileURL.deletingLastPathComponent()
+            while !fm.fileExists(atPath: ancestor.path) && ancestor.path != "/" {
+                ancestor.deleteLastPathComponent()
+            }
+            var ancestorIsDir: ObjCBool = false
+            if !fm.fileExists(atPath: ancestor.path, isDirectory: &ancestorIsDir) || !ancestorIsDir.boolValue {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTDIR), userInfo: [
+                    NSLocalizedDescriptionKey: "Vault parent path is not a directory: \(ancestor.path)"
+                ])
+            }
+            if !fm.isWritableFile(atPath: ancestor.path) {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES), userInfo: [
+                    NSLocalizedDescriptionKey: "Vault parent directory is not writable: \(ancestor.path)"
+                ])
+            }
+        }
+
+        if requireSubdirectoriesWritable {
+            for subDir in [snapshotsDirectory, stagingDirectory] {
+                var subIsDir: ObjCBool = false
+                if fm.fileExists(atPath: subDir.path, isDirectory: &subIsDir) {
+                    if !subIsDir.boolValue {
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENOTDIR), userInfo: [
+                            NSLocalizedDescriptionKey: "Vault subdirectory path is not a directory: \(subDir.path)"
+                        ])
+                    }
+                    if !fm.isWritableFile(atPath: subDir.path) {
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES), userInfo: [
+                            NSLocalizedDescriptionKey: "Vault subdirectory is not writable: \(subDir.path)"
+                        ])
+                    }
+                }
+            }
         }
 
         // Explicitly guard against POSIX atomic-rename silently replacing a 0444 read-only ledger.json
@@ -891,6 +971,23 @@ public final class FreezeLedgerStore: @unchecked Sendable {
                     NSLocalizedDescriptionKey: "Ledger file is read-only / not writable: \(ledgerFileURL.path)"
                 ])
             }
+        }
+    }
+
+    private func saveRecords(_ records: [FreezeSnapshotRecord], invokeHook: Bool = true) throws {
+        writeLock.lock()
+        writeCounter += 1
+        let seq = writeCounter
+        writeLock.unlock()
+
+        if invokeHook, let ledgerWriteHook {
+            try ledgerWriteHook(seq, records)
+        }
+
+        try verifyVaultWritablePreflight(requireSubdirectoriesWritable: false)
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: vaultDirectory.path) {
+            try fm.createDirectory(at: vaultDirectory, withIntermediateDirectories: true)
         }
 
         let encoder = JSONEncoder()

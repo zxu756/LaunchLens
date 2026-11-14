@@ -54,6 +54,13 @@ PKG_IDENTITY="$(basename "$(cd "$ROOT" && pwd)")"
 STATE_DIR="$FAKE_LAUNCHCTL_STATE_DIR"
 echo "$*" >> "$STATE_DIR/calls.log"
 SUBCMD="$1"
+if [ "$SUBCMD" = "print" ] && [ -f "$STATE_DIR/print_exit" ]; then
+    CODE="$(cat "$STATE_DIR/print_exit")"
+    if [ "$CODE" != "0" ]; then
+        echo "fake launchctl print: service not loaded (code=$CODE)" >&2
+        exit "$CODE"
+    fi
+fi
 if [ "$SUBCMD" = "bootout" ] && [ -f "$STATE_DIR/bootout_exit" ]; then
     CODE="$(cat "$STATE_DIR/bootout_exit")"
     if [ "$CODE" != "0" ]; then
@@ -98,6 +105,7 @@ let package = Package(
 EOF
 
     cat > "$PROBE_PKG/Sources/M0Probe/main.swift" <<'EOF'
+import Darwin
 import Foundation
 import LaunchLensCore
 
@@ -250,29 +258,42 @@ struct M0Probe {
             assertTrue(errA.localizedMessage(enLoc).contains("bootout was NOT called"), "Row 2a EN error confirms bootout skipped")
             assertTrue(errA.localizedMessage(zhLoc).contains("未调用 launchctl bootout"), "Row 2a ZH error confirms bootout skipped")
 
-            // Subcase 2b (L13): Read-only 0555 ledger directory (while LaunchAgents stays writable 0755)
+            // Subcase 2b (L13 & L19): Read-only 0555 ledger directory (while LaunchAgents & Snapshots/Staged stay writable 0755)
+            func mtimePair(_ url: URL) -> [Int] {
+                var st = stat()
+                assertTrue(lstat(url.path, &st) == 0, "lstat must succeed for \(url.path)")
+                return [st.st_mtimespec.tv_sec, st.st_mtimespec.tv_nsec]
+            }
+
             let caseDirB = workRoot.appendingPathComponent("row2b_dir0555")
             let stateDirB = caseDirB.appendingPathComponent("state")
             let agentsDirB = caseDirB.appendingPathComponent("LaunchAgents")
             let vaultFresh0555 = caseDirB.appendingPathComponent("VaultFresh0555")
             let vaultInit0555 = caseDirB.appendingPathComponent("VaultInit0555")
+            let snapsInit = vaultInit0555.appendingPathComponent("Snapshots")
+            let stagedInit = vaultInit0555.appendingPathComponent("Staged")
             try fm.createDirectory(at: stateDirB, withIntermediateDirectories: true)
             try fm.createDirectory(at: agentsDirB, withIntermediateDirectories: true)
             try fm.createDirectory(at: vaultFresh0555, withIntermediateDirectories: true)
-            try fm.createDirectory(at: vaultInit0555.appendingPathComponent("Snapshots"), withIntermediateDirectories: true)
-            try fm.createDirectory(at: vaultInit0555.appendingPathComponent("Staged"), withIntermediateDirectories: true)
+            try fm.createDirectory(at: snapsInit, withIntermediateDirectories: true)
+            try fm.createDirectory(at: stagedInit, withIntermediateDirectories: true)
             setenv("FAKE_LAUNCHCTL_STATE_DIR", stateDirB.path, 1)
 
             let plistURLB = agentsDirB.appendingPathComponent("io.accept.row2b.plist")
             let origB = samplePlist(label: "io.accept.row2b", program: "/usr/bin/true")
             try origB.write(to: plistURLB)
 
+            let sentinelDate = Date(timeIntervalSince1970: 1_700_000_000)
+            try fm.setAttributes([.modificationDate: sentinelDate], ofItemAtPath: snapsInit.path)
+            try fm.setAttributes([.modificationDate: sentinelDate], ofItemAtPath: stagedInit.path)
             try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: vaultFresh0555.path)
             try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: vaultInit0555.path)
             defer {
                 try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: vaultFresh0555.path)
                 try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: vaultInit0555.path)
             }
+            let snapsMtimeBefore = mtimePair(snapsInit)
+            let stagedMtimeBefore = mtimePair(stagedInit)
 
             let itemB = LaunchItem(
                 id: "user::io.accept.row2b",
@@ -295,13 +316,18 @@ struct M0Probe {
                 } catch let err as FreezeError {
                     caughtB = err
                 }
-                assertTrue(caughtB != nil, "Row 2b (L13) expected FreezeError on 0555 ledger dir \(dirURL.lastPathComponent)")
-                assertTrue(!fm.fileExists(atPath: stateDirB.appendingPathComponent("calls.log").path), "Row 2b (L13) must invoke fake launchctl 0 times")
-                assertTrue(fm.fileExists(atPath: plistURLB.path), "Row 2b (L13) original plist must still exist")
-                assertTrue((try Data(contentsOf: plistURLB)) == origB, "Row 2b (L13) original plist bytes must be unchanged")
+                assertTrue(caughtB != nil, "Row 2b (L13/L19) expected FreezeError on 0555 ledger dir \(dirURL.lastPathComponent)")
+                assertTrue(!fm.fileExists(atPath: stateDirB.appendingPathComponent("calls.log").path), "Row 2b (L13/L19) must invoke fake launchctl 0 times")
+                assertTrue(fm.fileExists(atPath: plistURLB.path), "Row 2b (L13/L19) original plist must still exist")
+                assertTrue((try Data(contentsOf: plistURLB)) == origB, "Row 2b (L13/L19) original plist bytes must be unchanged")
+                let snapCount = ((try? fm.contentsOfDirectory(atPath: storeB.snapshotsDirectory.path)) ?? []).count
+                let stagedCount = ((try? fm.contentsOfDirectory(atPath: storeB.stagingDirectory.path)) ?? []).count
+                assertTrue(snapCount == 0 && stagedCount == 0, "Row 2b (L19) must leave 0 files in Snapshots/ and Staged/")
             }
+            assertTrue(mtimePair(snapsInit) == snapsMtimeBefore, "Row 2b (L19) must write 0 transient files to Snapshots/")
+            assertTrue(mtimePair(stagedInit) == stagedMtimeBefore, "Row 2b (L19) must write 0 transient files to Staged/")
 
-            print("[Row 2 PASS] Read-only 0444 ledger.json & 0555 ledger directory (L13) -> threw error (EN/ZH), 0 launchctl calls, original plist intact.")
+            print("[Row 2 PASS] Read-only 0444 ledger.json & 0555 ledger directory (L13/L19) -> threw error, 0 vault writes, 0 launchctl calls, original plist intact.")
         }
 
         // ----------------------------------------------------------------
@@ -543,7 +569,8 @@ struct M0Probe {
             encoder.dateEncodingStrategy = .iso8601
             try encoder.encode([inProgressRec]).write(to: store.ledgerFileURL)
 
-            // 1. Non-zero bootstrap (exit 5) preserves recovery state & throws recoveryBootstrapFailed
+            // 1. Service is unloaded after bootout (print exits 113); non-zero bootstrap (exit 5) preserves recovery state & throws recoveryBootstrapFailed
+            try Data("113".utf8).write(to: stateDir.appendingPathComponent("print_exit"))
             try Data("5".utf8).write(to: stateDir.appendingPathComponent("bootstrap_exit"))
             var caughtFail: FreezeError?
             do {
@@ -565,17 +592,135 @@ struct M0Probe {
             try? fm.removeItem(at: stateDir.appendingPathComponent("calls.log"))
             let summary = try store.recoverInterruptedAndOrphanBackups()
             let callsText = (try? String(contentsOf: stateDir.appendingPathComponent("calls.log"), encoding: .utf8)) ?? ""
+            assertTrue(callsText.contains("print gui/501/io.accept.l14"), "L14 recovery must invoke read-only launchctl print first")
             assertTrue(callsText.contains("bootstrap gui/501 \(canonicalPlistPath)"), "L14 recovery must invoke launchctl bootstrap")
             assertTrue(summary.recoveredInProgressLabels == ["io.accept.l14"], "L14 recovery summary lists label")
             assertTrue(!fm.fileExists(atPath: snapURL.path), "L14 successful recovery removes snapshot backup")
             assertTrue(store.loadRecords().isEmpty, "L14 successful recovery clears inProgress record")
-            print("[L14 PASS] Post-bootout crash recovery re-runs launchctl bootstrap, preserves state on non-zero exit, and clears record on exit 0.")
+            print("[L14 PASS] Post-bootout crash recovery runs print pre-check, re-runs launchctl bootstrap, preserves state on non-zero exit, and clears record on exit 0.")
+        }
+
+        // ----------------------------------------------------------------
+        // L16 Check (XP2): Crash BEFORE bootout -> fake launchctl print exits 0 (loaded), bootstrap would exit 5 -> skips bootstrap and clears inProgress
+        // ----------------------------------------------------------------
+        do {
+            let caseDir = workRoot.appendingPathComponent("row_l16")
+            let stateDir = caseDir.appendingPathComponent("state")
+            let agentsDir = caseDir.appendingPathComponent("LaunchAgents")
+            let vaultDir = caseDir.appendingPathComponent("Vault")
+            try fm.createDirectory(at: stateDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+            setenv("FAKE_LAUNCHCTL_STATE_DIR", stateDir.path, 1)
+
+            // print_exit=0 (still loaded in launchd), bootstrap_exit=5 (would fail if invoked)
+            try Data("0".utf8).write(to: stateDir.appendingPathComponent("print_exit"))
+            try Data("5".utf8).write(to: stateDir.appendingPathComponent("bootstrap_exit"))
+
+            let plistURL = agentsDir.appendingPathComponent("io.accept.l16.plist")
+            let orig = samplePlist(label: "io.accept.l16", program: "/opt/l16/service")
+            try orig.write(to: plistURL)
+            let canonicalPlistPath = plistURL.resolvingSymlinksInPath().standardizedFileURL.path
+
+            let store = FreezeLedgerStore(
+                vaultDirectory: vaultDir,
+                userLaunchAgentsDirectory: agentsDir,
+                uid: 501,
+                launchctlExecutor: SystemLaunchctlExecutor(executableURL: fakeLaunchctlURL)
+            )
+            try fm.createDirectory(at: store.snapshotsDirectory, withIntermediateDirectories: true)
+            try fm.createDirectory(at: store.stagingDirectory, withIntermediateDirectories: true)
+            let snapURL = store.snapshotsDirectory.appendingPathComponent("io.accept.l16-tx.plist")
+            let stagedURL = store.stagingDirectory.appendingPathComponent("io.accept.l16-tx.staged.plist")
+            try orig.write(to: snapURL)
+            try orig.write(to: stagedURL)
+
+            let inProgressRec = FreezeSnapshotRecord(
+                id: "l16-prebootout",
+                label: "io.accept.l16",
+                originalPlistPath: canonicalPlistPath,
+                snapshotFilePath: snapURL.path,
+                stagedPlistPath: stagedURL.path,
+                sha256Hex: FreezeLedgerStore.sha256Hex(orig),
+                frozenAt: Date(),
+                rssBytesAtFreeze: 0,
+                status: .inProgress
+            )
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            try encoder.encode([inProgressRec]).write(to: store.ledgerFileURL)
+
+            let summary = try store.recoverInterruptedAndOrphanBackups()
+            let callsText = (try? String(contentsOf: stateDir.appendingPathComponent("calls.log"), encoding: .utf8)) ?? ""
+            assertTrue(callsText.trimmingCharacters(in: .whitespacesAndNewlines) == "print gui/501/io.accept.l16", "L16 must call ONLY launchctl print and NOT bootstrap")
+            assertTrue(summary.recoveredInProgressLabels == ["io.accept.l16"], "L16 recovery summary lists label")
+            assertTrue(fm.fileExists(atPath: canonicalPlistPath), "L16 original plist remains intact")
+            assertTrue(!fm.fileExists(atPath: snapURL.path) && !fm.fileExists(atPath: stagedURL.path), "L16 temporary backup & staged copies cleaned")
+            assertTrue(store.loadRecords().isEmpty, "L16 clears inProgress record on first call")
+            print("[L16 PASS] Pre-bootout crash recovery (print=0, bootstrap=5 via fake launchctl) skips bootstrap, cleans vault backup, and clears inProgress.")
+        }
+
+        // ----------------------------------------------------------------
+        // L17 Check (XP1): Branch-2 recovery when bootstrap exits 5 -> removes partial copy, preserves snapshot, downgrades to .frozen
+        // ----------------------------------------------------------------
+        do {
+            let caseDir = workRoot.appendingPathComponent("row_l17")
+            let stateDir = caseDir.appendingPathComponent("state")
+            let agentsDir = caseDir.appendingPathComponent("LaunchAgents")
+            let vaultDir = caseDir.appendingPathComponent("Vault")
+            try fm.createDirectory(at: stateDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+            setenv("FAKE_LAUNCHCTL_STATE_DIR", stateDir.path, 1)
+            try Data("5".utf8).write(to: stateDir.appendingPathComponent("bootstrap_exit"))
+
+            let store = FreezeLedgerStore(
+                vaultDirectory: vaultDir,
+                userLaunchAgentsDirectory: agentsDir,
+                uid: 501,
+                launchctlExecutor: SystemLaunchctlExecutor(executableURL: fakeLaunchctlURL)
+            )
+            try fm.createDirectory(at: store.snapshotsDirectory, withIntermediateDirectories: true)
+            try fm.createDirectory(at: store.stagingDirectory, withIntermediateDirectories: true)
+
+            let orig = samplePlist(label: "io.accept.l17", program: "/opt/l17/service")
+            let dstURL = agentsDir.appendingPathComponent("io.accept.l17.plist")
+            let snapURL = store.snapshotsDirectory.appendingPathComponent("io.accept.l17-tx.plist")
+            let stagedURL = store.stagingDirectory.appendingPathComponent("io.accept.l17-tx.staged.plist")
+            try orig.write(to: snapURL)
+            try orig.write(to: stagedURL)
+
+            let inProgressRec = FreezeSnapshotRecord(
+                id: "l17-branch2",
+                label: "io.accept.l17",
+                originalPlistPath: dstURL.path,
+                snapshotFilePath: snapURL.path,
+                stagedPlistPath: stagedURL.path,
+                sha256Hex: FreezeLedgerStore.sha256Hex(orig),
+                frozenAt: Date(),
+                rssBytesAtFreeze: 0,
+                status: .inProgress
+            )
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            try encoder.encode([inProgressRec]).write(to: store.ledgerFileURL)
+
+            let summary = try store.recoverInterruptedAndOrphanBackups()
+            assertTrue(summary.recoveredInProgressLabels == ["io.accept.l17"], "L17 recovery summary lists label")
+            assertTrue(!fm.fileExists(atPath: dstURL.path), "L17 removes unbootstrapped LaunchAgents copy")
+            assertTrue(!fm.fileExists(atPath: stagedURL.path), "L17 cleans duplicate staged copy")
+            assertTrue(fm.fileExists(atPath: snapURL.path) && ((try? Data(contentsOf: snapURL)) == orig), "L17 preserves vault snapshot byte-for-byte")
+            assertTrue(store.loadRecords().count == 1 && store.loadRecords().first?.status == .frozen, "L17 downgrades record from .inProgress to .frozen")
+
+            try Data("0".utf8).write(to: stateDir.appendingPathComponent("bootstrap_exit"))
+            try store.restore(recordID: "l17-branch2")
+            assertTrue(fm.fileExists(atPath: dstURL.path) && ((try? Data(contentsOf: dstURL)) == orig), "L17 manual restore succeeds once bootstrap exits 0")
+            assertTrue(store.loadRecords().isEmpty, "L17 manual restore clears frozen record")
+            print("[L17 PASS] Branch-2 failed-bootstrap recovery removes partial copy, preserves snapshot, downgrades to .frozen, and allows clean restore.")
         }
     }
 }
 EOF
 
-    echo "[Rows 1-6 + L14] Compiling & executing hermetic library probe..."
+    echo "[Rows 1-6 + L14/L16/L17] Compiling & executing hermetic library probe..."
     swift build --package-path "$PROBE_PKG" >/dev/null
     PROBE_BIN="$(swift build --package-path "$PROBE_PKG" --show-bin-path)/M0Probe"
     "$PROBE_BIN" "$TMP_ROOT/cases" "$FAKE_LAUNCHCTL"
@@ -644,16 +789,17 @@ mutations = [
         "expected_test_title": "Row 5 & Row 8 (L10): 1-byte corrupted backup is rejected on restore without writing plist or calling bootstrap",
     },
     {
-        "id": "M2 (L13 & Row 2: bypass pre-bootout Step 3 ledger write)",
+        "id": "M2 (L19 & L13 & Row 2: bypass Step 1 vault writability preflight check in freeze)",
         "rel_file": "Sources/LaunchLensCore/Services/FreezeLedgerStore.swift",
-        "target": """        do {
-            try saveRecords([txRecord] + existingRecords)
-        } catch {
-            try? fm.removeItem(at: snapURL)""",
-        "replacement": """        do {
-            if false { try saveRecords([txRecord] + existingRecords) }
-        } catch {
-            try? fm.removeItem(at: snapURL)""",
+        "target": """        // Preflight vault & ledger writability BEFORE creating directories or writing any backup file (L19)
+        do {
+            try verifyVaultWritablePreflight(requireSubdirectoriesWritable: true)
+        } catch {""",
+        "replacement": """        // MUTATION M2: bypass Step 1 vault writability preflight
+        let skipVaultPreflight = true
+        do {
+            if !skipVaultPreflight { try verifyVaultWritablePreflight(requireSubdirectoriesWritable: true) }
+        } catch {""",
         "filter": "FreezeLedgerTests/testReadOnlyLedgerDirectoryAbortsBeforeBootout",
         "expected_test_title": "L13 & Row 2: Read-only 0555 ledger directory aborts freeze before bootout with 0 launchctl calls and leaves plist untouched",
     },
@@ -688,10 +834,10 @@ mutations = [
     {
         "id": "M6 (L14: skip launchctl bootstrap during post-bootout crash recovery)",
         "rel_file": "Sources/LaunchLensCore/Services/FreezeLedgerStore.swift",
-        "target": """                // before removing the backup or clearing the inProgress record.
-                let res = launchctlExecutor.runLaunchctl(["bootstrap", "gui/\\(uid)", dstURL.path])""",
-        "replacement": """                // MUTATION M6: skip bootstrap in post-bootout recovery
-                let res = LaunchctlResult(exitCode: 0)""",
+        "target": """                    // Service is NOT loaded: re-bootstrap before removing backup or clearing inProgress
+                    let res = launchctlExecutor.runLaunchctl(["bootstrap", "gui/\\(uid)", dstURL.path])""",
+        "replacement": """                    // MUTATION M6: skip bootstrap in post-bootout recovery
+                    let res = LaunchctlResult(exitCode: 0)""",
         "filter": "FreezeLedgerTests/testCrashAfterBootoutBeforeMoveRebootstrapsAndChecksExitCode",
         "expected_test_title": "L14: Crash after bootout before stage-move re-bootstraps service on recovery and checks bootstrap exit code",
     },
@@ -718,6 +864,37 @@ mutations = [
                   !claimedPIDs.contains(proc.pid) else { continue }""",
         "filter": "ScannerCorrelationTests/testCorrelateAndOrphanDetection",
         "expected_test_title": "Correlates LaunchAgents with live RSS and isolates PPID==1 developer orphan daemons",
+    },
+    {
+        "id": "M9 (L16: skip launchctl print pre-check in Branch-1 recovery)",
+        "rel_file": "Sources/LaunchLensCore/Services/FreezeLedgerStore.swift",
+        "target": """                let printRes = launchctlExecutor.runLaunchctl(["print", "gui/\\(uid)/\\(rec.label)"])
+                if printRes.exitCode == 0 {""",
+        "replacement": """                // MUTATION M9: skip launchctl print pre-check
+                let printRes = LaunchctlResult(exitCode: 113)
+                if printRes.exitCode == 0 {""",
+        "filter": "FreezeLedgerTests/testL16Branch1RecoveryUsesFakeLaunchctlPrintPrecheck",
+        "expected_test_title": "L16 (XP2): Branch-1 recovery runs read-only launchctl print via fake executable before deciding whether to bootstrap",
+    },
+    {
+        "id": "M10 (L17: keep Branch-2 failed-bootstrap record stuck in .inProgress)",
+        "rel_file": "Sources/LaunchLensCore/Services/FreezeLedgerStore.swift",
+        "target": """                        // Branch 2: plist was already moved out of LaunchAgents prior to interruption.
+                        // Remove the unbootstrapped destination copy and downgrade to .frozen in the vault
+                        // so disk state matches .frozen and the user can inspect or restore manually.
+                        try? fm.removeItem(at: dstURL)
+                        if let stagedURL, stagedURL.standardizedFileURL != snapURL.standardizedFileURL {
+                            try? fm.removeItem(at: stagedURL)
+                        }
+                        rec.status = .frozen
+                        rec.stagedPlistPath = nil
+                        updatedRecords.append(rec)
+                        recoveredInProgress.append(rec.label)""",
+        "replacement": """                        // MUTATION M10: leave Branch-2 failed bootstrap stuck in .inProgress
+                        try? fm.removeItem(at: dstURL)
+                        updatedRecords.append(rec)""",
+        "filter": "FreezeLedgerTests/testL17Branch2BootstrapFailureDowngradesToFrozenCleanly",
+        "expected_test_title": "L17 (XP1): Branch-2 recovery downgrades record to .frozen when bootstrap fails, removes partial copy, and allows manual restore",
     },
 ]
 

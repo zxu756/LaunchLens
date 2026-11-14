@@ -1,15 +1,19 @@
+import Darwin
 import Foundation
 import Testing
 @testable import LaunchLensCore
 
 private final class ProgrammableLaunchctlMock: LaunchctlExecuting, @unchecked Sendable {
     var calls: [[String]] = []
+    var printResult = LaunchctlResult(exitCode: 113, stderr: "Could not find service")
     var bootoutResult = LaunchctlResult(exitCode: 0)
     var bootstrapResult = LaunchctlResult(exitCode: 0)
 
     func runLaunchctl(_ arguments: [String]) -> LaunchctlResult {
         calls.append(arguments)
         switch arguments.first {
+        case "print":
+            return printResult
         case "bootout":
             return bootoutResult
         case "bootstrap":
@@ -234,8 +238,13 @@ struct FreezeLedgerTests {
     }
 
     @Test("L13 & Row 2: Read-only 0555 ledger directory aborts freeze before bootout with 0 launchctl calls and leaves plist untouched")
-    @MainActor
     func testReadOnlyLedgerDirectoryAbortsBeforeBootout() throws {
+        func mtimePair(_ url: URL) throws -> [Int] {
+            var st = stat()
+            try #require(lstat(url.path, &st) == 0, "Expected lstat to succeed for \(url.path)")
+            return [st.st_mtimespec.tv_sec, st.st_mtimespec.tv_nsec]
+        }
+
         let fm = FileManager.default
         let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensL13-\(UUID().uuidString)")
         let agentsDir = tempRoot.appendingPathComponent("Library/LaunchAgents")
@@ -247,12 +256,18 @@ struct FreezeLedgerTests {
 
         // Subcase 2: Initialized vault directory (Snapshots/ & Staged/ writable 0755) with ledger parent dir set to 0555
         let vaultDir2 = tempRoot.appendingPathComponent("VaultInit0555")
-        try fm.createDirectory(at: vaultDir2.appendingPathComponent("Snapshots"), withIntermediateDirectories: true)
-        try fm.createDirectory(at: vaultDir2.appendingPathComponent("Staged"), withIntermediateDirectories: true)
+        let snapsDir2 = vaultDir2.appendingPathComponent("Snapshots")
+        let stagedDir2 = vaultDir2.appendingPathComponent("Staged")
+        try fm.createDirectory(at: snapsDir2, withIntermediateDirectories: true)
+        try fm.createDirectory(at: stagedDir2, withIntermediateDirectories: true)
+
+        // Subcase 3: Frozen service in vault whose ledger directory becomes 0555 before restore (thaw)
+        let vaultDir3 = tempRoot.appendingPathComponent("VaultRestore0555")
 
         defer {
             try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: vaultDir1.path)
             try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: vaultDir2.path)
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: vaultDir3.path)
             try? fm.removeItem(at: tempRoot)
         }
 
@@ -264,10 +279,18 @@ struct FreezeLedgerTests {
         let orig2 = samplePlistData(label: "io.test.l13init")
         try orig2.write(to: plistURL2)
 
+        let sentinelDate = Date(timeIntervalSince1970: 1_700_000_000)
+        try fm.setAttributes([.modificationDate: sentinelDate], ofItemAtPath: vaultDir1.path)
+        try fm.setAttributes([.modificationDate: sentinelDate], ofItemAtPath: snapsDir2.path)
+        try fm.setAttributes([.modificationDate: sentinelDate], ofItemAtPath: stagedDir2.path)
         try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: vaultDir1.path)
         try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: vaultDir2.path)
 
-        // Verify Subcase 1 (fresh 0555 vaultDir)
+        let vault1MtimeBefore = try mtimePair(vaultDir1)
+        let snaps2MtimeBefore = try mtimePair(snapsDir2)
+        let staged2MtimeBefore = try mtimePair(stagedDir2)
+
+        // Verify Subcase 1 (fresh 0555 vaultDir -> hits preflight check before any directory/file creation)
         let mock1 = ProgrammableLaunchctlMock()
         let store1 = FreezeLedgerStore(
             vaultDirectory: vaultDir1,
@@ -282,14 +305,25 @@ struct FreezeLedgerTests {
             plistPath: plistURL1.path,
             programCommand: "/usr/bin/true"
         )
-        #expect(throws: FreezeError.self) {
+        var caught1: FreezeError?
+        do {
             try store1.freeze(item: item1)
+        } catch let err as FreezeError {
+            caught1 = err
         }
+        let err1 = try #require(caught1)
+        if case .ledgerWriteFailed = err1 {
+            // Expected structural error enum case from preflight ledger-writability check (no error text check)
+        } else {
+            Issue.record("Expected FreezeError.ledgerWriteFailed from preflight check in Subcase 1, got \(err1)")
+        }
+        #expect(((try? fm.contentsOfDirectory(atPath: vaultDir1.path)) ?? []).isEmpty)
+        #expect(try mtimePair(vaultDir1) == vault1MtimeBefore)
         #expect(mock1.calls.isEmpty)
         #expect(fm.fileExists(atPath: plistURL1.path))
         #expect(try Data(contentsOf: plistURL1) == orig1)
 
-        // Verify Subcase 2 (initialized Snapshots/Staged + 0555 ledger directory -> hits saveRecords pre-bootout check)
+        // Verify Subcase 2 (writable 0755 Snapshots/ & Staged/, read-only 0555 ledger dir -> structural zero-side-effect invariants)
         let mock2 = ProgrammableLaunchctlMock()
         let store2 = FreezeLedgerStore(
             vaultDirectory: vaultDir2,
@@ -304,23 +338,49 @@ struct FreezeLedgerTests {
             plistPath: plistURL2.path,
             programCommand: "/usr/bin/true"
         )
-        var caught2: FreezeError?
-        do {
+        #expect(throws: FreezeError.self) {
             try store2.freeze(item: item2)
-        } catch let err as FreezeError {
-            caught2 = err
         }
-        let err2 = try #require(caught2)
-        let enMsg = err2.localizedMessage(AppLocalizer(fixedLanguage: .en))
-        let zhMsg = err2.localizedMessage(AppLocalizer(fixedLanguage: .zhHans))
-        #expect(enMsg.contains("Vault directory is not writable"))
-        #expect(enMsg.contains("bootout was NOT called"))
-        #expect(zhMsg.contains("未调用 launchctl bootout"))
+        let leftoverSnaps = (try? fm.contentsOfDirectory(atPath: store2.snapshotsDirectory.path)) ?? []
+        let leftoverStaged = (try? fm.contentsOfDirectory(atPath: store2.stagingDirectory.path)) ?? []
+        #expect(leftoverSnaps.isEmpty)
+        #expect(leftoverStaged.isEmpty)
+        // Prove zero files/bytes were written into Snapshots/ or Staged/ even transiently before failure
+        #expect(try mtimePair(snapsDir2) == snaps2MtimeBefore)
+        #expect(try mtimePair(stagedDir2) == staged2MtimeBefore)
         #expect(mock2.calls.isEmpty)
         #expect(fm.fileExists(atPath: plistURL2.path))
         #expect(try Data(contentsOf: plistURL2) == orig2)
-        let leftoverSnaps = (try? fm.contentsOfDirectory(atPath: store2.snapshotsDirectory.path)) ?? []
-        #expect(leftoverSnaps.isEmpty)
+
+        // Verify Subcase 3 (restore / thaw on 0555 read-only vaultDir aborts before writing target plist or calling bootstrap)
+        let plistURL3 = agentsDir.appendingPathComponent("io.test.l13restore.plist")
+        let orig3 = samplePlistData(label: "io.test.l13restore")
+        try orig3.write(to: plistURL3)
+        let mock3 = ProgrammableLaunchctlMock()
+        let store3 = FreezeLedgerStore(
+            vaultDirectory: vaultDir3,
+            userLaunchAgentsDirectory: agentsDir,
+            uid: 501,
+            launchctlExecutor: mock3
+        )
+        let item3 = LaunchItem(
+            id: "user::io.test.l13restore",
+            label: "io.test.l13restore",
+            domain: .userAgent,
+            plistPath: plistURL3.path,
+            programCommand: "/usr/bin/true"
+        )
+        let frozen3 = try store3.freeze(item: item3)
+        mock3.calls.removeAll()
+        try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: vaultDir3.path)
+
+        #expect(throws: FreezeError.self) {
+            try store3.restore(recordID: frozen3.id)
+        }
+        #expect(!fm.fileExists(atPath: plistURL3.path))
+        #expect(mock3.calls.isEmpty)
+        #expect(fm.fileExists(atPath: frozen3.snapshotFilePath))
+        #expect(try Data(contentsOf: URL(fileURLWithPath: frozen3.snapshotFilePath)) == orig3)
     }
 
     @Test("L1 Step 6 Finalize Failure: Rolls back staged plist to LaunchAgents and re-bootstraps")
@@ -842,7 +902,10 @@ struct FreezeLedgerTests {
             )
 
             let summary = try okRecoveryStore.recoverInterruptedAndOrphanBackups()
-            #expect(okRecoveryMock.calls == [["bootstrap", "gui/501", stateA.canonicalPlistPath]])
+            #expect(okRecoveryMock.calls == [
+                ["print", "gui/501/io.test.l14crash"],
+                ["bootstrap", "gui/501", stateA.canonicalPlistPath]
+            ])
             #expect(summary.recoveredInProgressLabels == ["io.test.l14crash"])
             #expect(fm.fileExists(atPath: stateA.canonicalPlistPath))
             #expect(try Data(contentsOf: URL(fileURLWithPath: stateA.canonicalPlistPath)) == stateA.originalBytes)
@@ -869,7 +932,10 @@ struct FreezeLedgerTests {
             } catch let err as FreezeError {
                 caughtRecoveryError = err
             }
-            #expect(failRecoveryMock.calls == [["bootstrap", "gui/501", stateB.canonicalPlistPath]])
+            #expect(failRecoveryMock.calls == [
+                ["print", "gui/501/io.test.l14crash"],
+                ["bootstrap", "gui/501", stateB.canonicalPlistPath]
+            ])
             #expect(fm.fileExists(atPath: stateB.canonicalPlistPath))
             #expect(fm.fileExists(atPath: stateB.snapURL.path))
             #expect(failRecoveryStore.loadRecords().count == 1)
@@ -879,5 +945,241 @@ struct FreezeLedgerTests {
             #expect(recoveryErr.localizedMessage(AppLocalizer(fixedLanguage: .en)).contains("exit code 5"))
             #expect(recoveryErr.localizedMessage(AppLocalizer(fixedLanguage: .zhHans)).contains("退出码 5"))
         }
+    }
+
+    @Test("L16 (XP2): Branch-1 recovery runs read-only launchctl print via fake executable before deciding whether to bootstrap")
+    @MainActor
+    func testL16Branch1RecoveryUsesFakeLaunchctlPrintPrecheck() throws {
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensL16-\(UUID().uuidString)")
+        try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        func makeFakeLaunchctlScript(in caseDir: URL, printExit: Int32, bootstrapExit: Int32) throws -> (scriptURL: URL, callsLogURL: URL) {
+            let binDir = caseDir.appendingPathComponent("fakebin")
+            try fm.createDirectory(at: binDir, withIntermediateDirectories: true)
+            let callsLogURL = binDir.appendingPathComponent("calls.log")
+            let scriptURL = binDir.appendingPathComponent("fake-launchctl.sh")
+            let script = """
+            #!/bin/sh
+            echo "$*" >> "\(callsLogURL.path)"
+            if [ "$1" = "print" ]; then
+                if [ "\(printExit)" != "0" ]; then
+                    echo "Could not find service in domain" >&2
+                fi
+                exit \(printExit)
+            fi
+            if [ "$1" = "bootstrap" ]; then
+                if [ "\(bootstrapExit)" != "0" ]; then
+                    echo "Bootstrap failed: \(bootstrapExit): Input/output error" >&2
+                fi
+                exit \(bootstrapExit)
+            fi
+            exit 0
+            """
+            try Data(script.utf8).write(to: scriptURL, options: .atomic)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+            return (scriptURL, callsLogURL)
+        }
+
+        func stageBranch1InProgress(
+            caseName: String,
+            label: String,
+            printExit: Int32,
+            bootstrapExit: Int32
+        ) throws -> (store: FreezeLedgerStore, callsLogURL: URL, canonicalPlistPath: String, snapURL: URL, stagedURL: URL, originalBytes: Data) {
+            let caseDir = tempRoot.appendingPathComponent(caseName)
+            let agentsDir = caseDir.appendingPathComponent("Library/LaunchAgents")
+            let vaultDir = caseDir.appendingPathComponent("Vault")
+            try fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+
+            let plistURL = agentsDir.appendingPathComponent("\(label).plist")
+            let originalBytes = samplePlistData(label: label, program: "/opt/l16/\(caseName)")
+            try originalBytes.write(to: plistURL, options: .atomic)
+            let canonicalPlistPath = plistURL.resolvingSymlinksInPath().standardizedFileURL.path
+
+            let fake = try makeFakeLaunchctlScript(in: caseDir, printExit: printExit, bootstrapExit: bootstrapExit)
+            let store = FreezeLedgerStore(
+                vaultDirectory: vaultDir,
+                userLaunchAgentsDirectory: agentsDir,
+                uid: 501,
+                launchctlExecutor: SystemLaunchctlExecutor(executableURL: fake.scriptURL)
+            )
+            try fm.createDirectory(at: store.snapshotsDirectory, withIntermediateDirectories: true)
+            try fm.createDirectory(at: store.stagingDirectory, withIntermediateDirectories: true)
+            let snapURL = store.snapshotsDirectory.appendingPathComponent("\(label)-tx.plist")
+            let stagedURL = store.stagingDirectory.appendingPathComponent("\(label)-tx.staged.plist")
+            try originalBytes.write(to: snapURL, options: .atomic)
+            try originalBytes.write(to: stagedURL, options: .atomic)
+
+            let rec = FreezeSnapshotRecord(
+                id: "tx-\(caseName)",
+                label: label,
+                originalPlistPath: canonicalPlistPath,
+                snapshotFilePath: snapURL.path,
+                stagedPlistPath: stagedURL.path,
+                sha256Hex: FreezeLedgerStore.sha256Hex(originalBytes),
+                frozenAt: Date(),
+                rssBytesAtFreeze: 0,
+                status: .inProgress
+            )
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            try encoder.encode([rec]).write(to: store.ledgerFileURL, options: .atomic)
+            return (store, fake.callsLogURL, canonicalPlistPath, snapURL, stagedURL, originalBytes)
+        }
+
+        func readCalls(_ logURL: URL) -> [String] {
+            guard let text = try? String(contentsOf: logURL, encoding: .utf8) else { return [] }
+            return text.split(separator: "\n").map(String.init)
+        }
+
+        // Case A (crash before bootout: print exits 0 -> already loaded; bootstrap would exit 5):
+        // Must NOT call bootstrap, must clean up backup/staged copies and clear .inProgress on the first call.
+        do {
+            let stateA = try stageBranch1InProgress(caseName: "caseA", label: "io.test.l16a", printExit: 0, bootstrapExit: 5)
+            let summary = try stateA.store.recoverInterruptedAndOrphanBackups()
+            #expect(readCalls(stateA.callsLogURL) == ["print gui/501/io.test.l16a"])
+            #expect(summary.recoveredInProgressLabels == ["io.test.l16a"])
+            #expect(fm.fileExists(atPath: stateA.canonicalPlistPath))
+            #expect(try Data(contentsOf: URL(fileURLWithPath: stateA.canonicalPlistPath)) == stateA.originalBytes)
+            #expect(!fm.fileExists(atPath: stateA.snapURL.path))
+            #expect(!fm.fileExists(atPath: stateA.stagedURL.path))
+            #expect(stateA.store.loadRecords().isEmpty)
+            #expect(!stateA.store.auditInterruptedTransactionsAndOrphanBackups().hasIssues)
+        }
+
+        // Case B (crash after bootout before moveItem: print exits 113, bootstrap exits 0):
+        // Sees print != 0, invokes launchctl bootstrap gui/501 <plistPath>, cleans backup/staged, clears .inProgress.
+        do {
+            let stateB = try stageBranch1InProgress(caseName: "caseB", label: "io.test.l16b", printExit: 113, bootstrapExit: 0)
+            let summary = try stateB.store.recoverInterruptedAndOrphanBackups()
+            #expect(readCalls(stateB.callsLogURL) == [
+                "print gui/501/io.test.l16b",
+                "bootstrap gui/501 \(stateB.canonicalPlistPath)"
+            ])
+            #expect(summary.recoveredInProgressLabels == ["io.test.l16b"])
+            #expect(fm.fileExists(atPath: stateB.canonicalPlistPath))
+            #expect(try Data(contentsOf: URL(fileURLWithPath: stateB.canonicalPlistPath)) == stateB.originalBytes)
+            #expect(!fm.fileExists(atPath: stateB.snapURL.path))
+            #expect(!fm.fileExists(atPath: stateB.stagedURL.path))
+            #expect(stateB.store.loadRecords().isEmpty)
+            #expect(!stateB.store.auditInterruptedTransactionsAndOrphanBackups().hasIssues)
+        }
+
+        // Case C (print exits 113 AND bootstrap exits 5):
+        // Preserves .inProgress record, original plist, and snapshot backup, and surfaces explicit error.
+        do {
+            let stateC = try stageBranch1InProgress(caseName: "caseC", label: "io.test.l16c", printExit: 113, bootstrapExit: 5)
+            var caught: FreezeError?
+            do {
+                _ = try stateC.store.recoverInterruptedAndOrphanBackups()
+            } catch let err as FreezeError {
+                caught = err
+            }
+            #expect(readCalls(stateC.callsLogURL) == [
+                "print gui/501/io.test.l16c",
+                "bootstrap gui/501 \(stateC.canonicalPlistPath)"
+            ])
+            #expect(fm.fileExists(atPath: stateC.canonicalPlistPath))
+            #expect(try Data(contentsOf: URL(fileURLWithPath: stateC.canonicalPlistPath)) == stateC.originalBytes)
+            #expect(fm.fileExists(atPath: stateC.snapURL.path))
+            #expect(try Data(contentsOf: stateC.snapURL) == stateC.originalBytes)
+            #expect(stateC.store.loadRecords().count == 1)
+            #expect(stateC.store.loadRecords().first?.status == .inProgress)
+            #expect(stateC.store.auditInterruptedTransactionsAndOrphanBackups().hasIssues)
+            let err = try #require(caught)
+            #expect(err.localizedMessage(AppLocalizer(fixedLanguage: .en)).contains("exit code 5"))
+            #expect(err.localizedMessage(AppLocalizer(fixedLanguage: .zhHans)).contains("退出码 5"))
+        }
+    }
+
+    @Test("L17 (XP1): Branch-2 recovery downgrades record to .frozen when bootstrap fails, removes partial copy, and allows manual restore")
+    func testL17Branch2BootstrapFailureDowngradesToFrozenCleanly() throws {
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensL17-\(UUID().uuidString)")
+        let agentsDir = tempRoot.appendingPathComponent("Library/LaunchAgents")
+        let vaultDir = tempRoot.appendingPathComponent("Vault")
+        let binDir = tempRoot.appendingPathComponent("fakebin")
+        try fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: binDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let exitCodeFile = binDir.appendingPathComponent("bootstrap_exit")
+        let callsLogURL = binDir.appendingPathComponent("calls.log")
+        let fakeScriptURL = binDir.appendingPathComponent("fake-launchctl.sh")
+        let script = """
+        #!/bin/sh
+        echo "$*" >> "\(callsLogURL.path)"
+        if [ "$1" = "bootstrap" ] && [ -f "\(exitCodeFile.path)" ]; then
+            CODE="$(cat "\(exitCodeFile.path)")"
+            if [ "$CODE" != "0" ]; then
+                echo "Bootstrap failed: $CODE: Input/output error" >&2
+                exit "$CODE"
+            fi
+        fi
+        exit 0
+        """
+        try Data(script.utf8).write(to: fakeScriptURL, options: .atomic)
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeScriptURL.path)
+        try Data("5".utf8).write(to: exitCodeFile, options: .atomic)
+
+        let store = FreezeLedgerStore(
+            vaultDirectory: vaultDir,
+            userLaunchAgentsDirectory: agentsDir,
+            uid: 501,
+            launchctlExecutor: SystemLaunchctlExecutor(executableURL: fakeScriptURL)
+        )
+        try fm.createDirectory(at: store.snapshotsDirectory, withIntermediateDirectories: true)
+        try fm.createDirectory(at: store.stagingDirectory, withIntermediateDirectories: true)
+
+        // Branch 2 state: crash occurred AFTER Step 5 moved .plist out of LaunchAgents and BEFORE Step 6 committed .frozen
+        let label = "io.test.l17xp1"
+        let originalBytes = samplePlistData(label: label, program: "/opt/l17/service")
+        let dstURL = agentsDir.appendingPathComponent("\(label).plist")
+        let snapURL = store.snapshotsDirectory.appendingPathComponent("\(label)-tx17.plist")
+        let stagedURL = store.stagingDirectory.appendingPathComponent("\(label)-tx17.staged.plist")
+        try originalBytes.write(to: snapURL, options: .atomic)
+        try originalBytes.write(to: stagedURL, options: .atomic)
+
+        let inProgressRec = FreezeSnapshotRecord(
+            id: "tx17",
+            label: label,
+            originalPlistPath: dstURL.path,
+            snapshotFilePath: snapURL.path,
+            stagedPlistPath: stagedURL.path,
+            sha256Hex: FreezeLedgerStore.sha256Hex(originalBytes),
+            frozenAt: Date(),
+            rssBytesAtFreeze: 0,
+            status: .inProgress
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode([inProgressRec]).write(to: store.ledgerFileURL, options: .atomic)
+
+        // 1. Recovery attempts bootstrap (exit 5), removes partial copy in LaunchAgents, preserves vault backup,
+        // and downgrades record from .inProgress to .frozen cleanly (80e49f1 contract).
+        let summary = try store.recoverInterruptedAndOrphanBackups()
+        #expect(summary.recoveredInProgressLabels == [label])
+        #expect(!fm.fileExists(atPath: dstURL.path))
+        #expect(!fm.fileExists(atPath: stagedURL.path))
+        #expect(fm.fileExists(atPath: snapURL.path))
+        #expect(try Data(contentsOf: snapURL) == originalBytes)
+
+        let recordsAfterRecovery = store.loadRecords()
+        #expect(recordsAfterRecovery.count == 1)
+        let downgraded = try #require(recordsAfterRecovery.first)
+        #expect(downgraded.id == "tx17")
+        #expect(downgraded.status == .frozen)
+        #expect(downgraded.stagedPlistPath == nil)
+        #expect(!store.auditInterruptedTransactionsAndOrphanBackups().hasIssues)
+
+        // 2. Subsequent manual restore succeeds cleanly once bootstrap exits 0
+        try Data("0".utf8).write(to: exitCodeFile, options: .atomic)
+        try store.restore(recordID: downgraded.id)
+        #expect(fm.fileExists(atPath: dstURL.path))
+        #expect(try Data(contentsOf: dstURL) == originalBytes)
+        #expect(!fm.fileExists(atPath: snapURL.path))
+        #expect(store.loadRecords().isEmpty)
     }
 }

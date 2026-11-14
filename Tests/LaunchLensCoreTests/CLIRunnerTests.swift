@@ -184,6 +184,26 @@ struct CLIRunnerTests {
         #expect(auditIssueZH.exitCode == 1)
         #expect(auditIssueZH.stderr.contains("无台账记录的孤儿备份文件（1 个）"))
     }
+
+    @Test("L18: Both README.md and README.zh-CN.md include v0.1.0/v0.2.0 upgrade --cli audit safety notice")
+    func testL18ReadmesIncludeUpgradeAuditSafetyNotice() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let readmeEN = try String(contentsOf: repoRoot.appendingPathComponent("README.md"), encoding: .utf8)
+        let readmeZH = try String(contentsOf: repoRoot.appendingPathComponent("README.zh-CN.md"), encoding: .utf8)
+
+        #expect(readmeEN.contains("Upgrade Check for `v0.1.0` / `v0.2.0` Users"))
+        #expect(readmeEN.contains("deleted the active `.plist` before persisting `ledger.json`"))
+        #expect(readmeEN.contains("ignored non-zero `launchctl` exit codes"))
+        #expect(readmeEN.contains("LaunchLens --cli audit"))
+
+        #expect(readmeZH.contains("`v0.1.0` / `v0.2.0` 用户升级自检提示"))
+        #expect(readmeZH.contains("先删除原 `.plist` 最后才写 `ledger.json`"))
+        #expect(readmeZH.contains("未检查 `launchctl` 退出码"))
+        #expect(readmeZH.contains("LaunchLens --cli audit --lang zh"))
+    }
 }
 
 private final class BundleToken {}
