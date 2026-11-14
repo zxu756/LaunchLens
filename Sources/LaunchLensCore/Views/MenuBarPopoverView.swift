@@ -32,6 +32,16 @@ public struct MenuBarPopoverView: View {
                             .font(.system(size: 13.5, weight: .bold))
                             .tracking(-0.2)
                             .foregroundStyle(LedgerTheme.ink)
+                        if monitor.isStaticPreview {
+                            Text(localizer.L("DEMO", "演示"))
+                                .font(.system(size: 9.5, weight: .bold, design: .monospaced))
+                                .foregroundStyle(LedgerTheme.terracotta)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 1.5)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(LedgerTheme.terracotta.opacity(0.12)))
+                                .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).strokeBorder(LedgerTheme.terracotta.opacity(0.42), lineWidth: 1))
+                        }
                     }
                     Spacer()
                     LanguageTogglePill(localizer: localizer, compact: true)
@@ -66,6 +76,35 @@ public struct MenuBarPopoverView: View {
             .background(LedgerTheme.canvas)
 
             Rectangle().fill(LedgerTheme.hairline).frame(height: 1)
+
+            if monitor.integrityReport.hasIssues {
+                HStack(spacing: 6) {
+                    Image(systemName: "wrench.and.screwdriver.fill")
+                        .font(.system(size: 10.5, weight: .semibold))
+                        .foregroundStyle(LedgerTheme.terracotta)
+                    Text(localizer.L("Interrupted ledger / orphan backup", "发现中断事务或孤儿备份"))
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(LedgerTheme.ink)
+                        .lineLimit(1)
+                    Spacer()
+                    if monitor.integrityReport.corruptedLedgerError == nil {
+                        Button(action: { monitor.requestRepairIntegrity() }) {
+                            Text(localizer.L("Repair / Recover", "修复 / 恢复"))
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 2.5)
+                                .fixedSize(horizontal: true, vertical: false)
+                                .background(RoundedRectangle(cornerRadius: 4, style: .continuous).fill(LedgerTheme.terracotta))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 6.5)
+                .background(LedgerTheme.terracotta.opacity(0.10))
+                Rectangle().fill(LedgerTheme.rowRule).frame(height: 1)
+            }
 
             // Top 5 Memory Consumers
             VStack(alignment: .leading, spacing: 0) {
@@ -139,7 +178,7 @@ public struct MenuBarPopoverView: View {
                     .foregroundStyle(LedgerTheme.muted)
                     .lineLimit(1)
                     Spacer()
-                    Button(action: { monitor.restore(latest) }) {
+                    Button(action: { monitor.requestRestore(latest) }) {
                         Text(localizer.L("Restore", "恢复"))
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(LedgerTheme.forest)
@@ -208,12 +247,15 @@ public struct MenuBarPopoverView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .environment(\.locale, localizer.language.locale)
         .preferredColorScheme(.light)
+        .sheet(item: $monitor.pendingConfirmation) { action in
+            ActionConfirmationSheetView(monitor: monitor, localizer: localizer, action: action)
+        }
     }
 
     @ViewBuilder
     private func quickActionButton(for item: LaunchItem) -> some View {
         if item.domain == .userAgent && !item.isAppleSystem {
-            Button(action: { monitor.freeze(item) }) {
+            Button(action: { monitor.requestFreeze(item) }) {
                 Text(localizer.L("Freeze", "冻结"))
                     .font(.system(size: 10.5, weight: .semibold))
                     .foregroundStyle(LedgerTheme.cobalt)
@@ -225,17 +267,10 @@ public struct MenuBarPopoverView: View {
             }
             .buttonStyle(.plain)
         } else if item.domain == .orphanDaemon {
-            Button(action: { monitor.terminateOrphan(item) }) {
-                Text(localizer.L("Stop", "终止"))
-                    .font(.system(size: 10.5, weight: .semibold))
-                    .foregroundStyle(LedgerTheme.terracotta)
-                    .padding(.horizontal, 7)
-                    .padding(.vertical, 3)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .background(RoundedRectangle(cornerRadius: 5, style: .continuous).fill(LedgerTheme.terracotta.opacity(0.10)))
-                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(LedgerTheme.terracotta.opacity(0.32), lineWidth: 1))
-            }
-            .buttonStyle(.plain)
+            Text(localizer.L("Read-only", "只读"))
+                .font(.system(size: 10))
+                .foregroundStyle(LedgerTheme.subtle)
+                .fixedSize(horizontal: true, vertical: false)
         }
     }
 }

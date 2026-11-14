@@ -19,6 +19,138 @@ public enum LedgerTheme {
     public static let plum = Color(red: 0.392, green: 0.263, blue: 0.608)       // #64439B global agent
 }
 
+public struct ActionConfirmationSheetView: View {
+    @ObservedObject var monitor: LaunchLensMonitor
+    @ObservedObject var localizer: AppLocalizer
+    let action: PendingConfirmationAction
+
+    public var body: some View {
+        let details = monitor.confirmationDetails(for: action, localizer: localizer)
+        let isConflict: Bool = {
+            if case .resolveRestoreConflict = action { return true }
+            return false
+        }()
+
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 9) {
+                Image(systemName: isConflict ? "exclamationmark.triangle.fill" : "terminal.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(isConflict ? LedgerTheme.terracotta : LedgerTheme.cobalt)
+                Text(details.title)
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(LedgerTheme.ink)
+                Spacer()
+            }
+
+            Text(details.summary)
+                .font(.system(size: 12.5))
+                .foregroundStyle(LedgerTheme.muted)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(localizer.L("Exact command to execute", "即将执行的命令"))
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(LedgerTheme.muted)
+                Text(details.exactCommand)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundStyle(LedgerTheme.ink)
+                    .textSelection(.enabled)
+                    .padding(9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(LedgerTheme.well))
+                    .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(LedgerTheme.hairline, lineWidth: 1))
+            }
+
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .top, spacing: 8) {
+                    Text(details.sourcePathLabel + ":")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(LedgerTheme.muted)
+                        .frame(width: 126, alignment: .leading)
+                    Text(details.sourcePath)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(LedgerTheme.ink)
+                        .textSelection(.enabled)
+                }
+                HStack(alignment: .top, spacing: 8) {
+                    Text(details.targetPathLabel + ":")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(LedgerTheme.muted)
+                        .frame(width: 126, alignment: .leading)
+                    Text(details.targetPath)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(LedgerTheme.ink)
+                        .textSelection(.enabled)
+                }
+            }
+
+            if let diff = details.diffSummary {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(localizer.L("Detected file difference", "两份文件的差异摘要"))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(LedgerTheme.terracotta)
+                    Text(diff)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(LedgerTheme.ink)
+                        .textSelection(.enabled)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(LedgerTheme.terracotta.opacity(0.08)))
+                        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(LedgerTheme.terracotta.opacity(0.32), lineWidth: 1))
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button(action: { monitor.cancelPendingConfirmation() }) {
+                    Text(details.cancelTitle)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(LedgerTheme.ink)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(LedgerTheme.sheet))
+                        .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(LedgerTheme.hairline, lineWidth: 1))
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+
+                if isConflict {
+                    Button(action: { monitor.resolveConflictKeepExisting() }) {
+                        Text(localizer.L("Keep Existing & Clear Record", "保留现有文件并清理记录"))
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(LedgerTheme.cobalt)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(LedgerTheme.cobalt.opacity(0.10)))
+                            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(LedgerTheme.cobalt.opacity(0.35), lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Button(action: { monitor.confirmPendingAction() }) {
+                    Text(details.confirmTitle)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                        .background(
+                            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                .fill(isConflict ? LedgerTheme.terracotta : LedgerTheme.cobalt)
+                        )
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.top, 4)
+        }
+        .padding(20)
+        .frame(width: 560)
+        .background(LedgerTheme.canvas)
+        .foregroundStyle(LedgerTheme.ink)
+        .environment(\.locale, localizer.language.locale)
+        .preferredColorScheme(.light)
+    }
+}
+
 public struct MainDashboardView: View {
     @ObservedObject var monitor: LaunchLensMonitor
     @ObservedObject var localizer: AppLocalizer
@@ -49,6 +181,9 @@ public struct MainDashboardView: View {
         .foregroundStyle(LedgerTheme.ink)
         .environment(\.locale, localizer.language.locale)
         .preferredColorScheme(.light)
+        .sheet(item: $monitor.pendingConfirmation) { action in
+            ActionConfirmationSheetView(monitor: monitor, localizer: localizer, action: action)
+        }
     }
 
     // MARK: - Top Masthead
@@ -64,14 +199,32 @@ public struct MainDashboardView: View {
                     .foregroundStyle(.white)
             }
 
-            HStack(alignment: .firstTextBaseline, spacing: 10) {
+            HStack(alignment: .center, spacing: 8) {
                 Text("LaunchLens")
                     .font(.system(size: 17, weight: .bold))
                     .tracking(-0.35)
                     .foregroundStyle(LedgerTheme.ink)
+
+                if monitor.isStaticPreview {
+                    Text(localizer.L("DEMO PREVIEW", "演示数据 DEMO"))
+                        .font(.system(size: 10.5, weight: .bold, design: .monospaced))
+                        .foregroundStyle(LedgerTheme.terracotta)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 2.5)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .fill(LedgerTheme.terracotta.opacity(0.12))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                .strokeBorder(LedgerTheme.terracotta.opacity(0.42), lineWidth: 1)
+                        )
+                }
+
                 Text(localizer.L(
-                    "Persistent LaunchAgents, orphan daemons & SHA-256 reversible snapshots",
-                    "常驻 LaunchAgents、孤儿守护进程与 SHA-256 可逆冻结账本"
+                    "User LaunchAgents, orphan daemons & SHA-256 reversible freeze ledger",
+                    "用户级 LaunchAgents、孤儿守护进程与 SHA-256 可逆冻结账本"
                 ))
                 .font(.system(size: 12.5))
                 .foregroundStyle(LedgerTheme.muted)
@@ -118,7 +271,7 @@ public struct MainDashboardView: View {
                 ledgerMetricCell(
                     value: ByteFormatter.memory(monitor.snapshot.totalBackgroundRSSBytes),
                     label: localizer.L("Background resident RAM", "后台常驻内存 (RSS)"),
-                    detail: localizer.L("Non-Apple persistent footprint", "非 Apple 常驻进程总占用"),
+                    detail: localizer.L("User launchctl PIDs + orphans", "用户域 launchctl 与孤儿进程"),
                     accent: LedgerTheme.ink
                 )
                 verticalRule
@@ -138,8 +291,8 @@ public struct MainDashboardView: View {
                     detail: monitor.snapshot.orphanItems.isEmpty
                         ? localizer.L("Zero PPID=1 orphan daemons", "0 个 PPID=1 脱离终端进程")
                         : localizer.L(
-                            "\(monitor.snapshot.orphanItems.count) detached PPID=1 processes",
-                            "\(monitor.snapshot.orphanItems.count) 个脱离终端的 PPID=1 进程"
+                            "\(monitor.snapshot.orphanItems.count) detached PPID=1 (read-only)",
+                            "\(monitor.snapshot.orphanItems.count) 个脱离终端进程（只读）"
                         ),
                     accent: monitor.snapshot.orphanItems.isEmpty ? LedgerTheme.ink : LedgerTheme.terracotta
                 )
@@ -403,6 +556,34 @@ public struct MainDashboardView: View {
 
     @ViewBuilder
     private func ledgerRowsListContent(maxRSS: Int64) -> some View {
+        if let integrityMsg = monitor.localizedIntegrityBannerText(localizer) {
+            HStack(spacing: 10) {
+                Image(systemName: "wrench.and.screwdriver.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(LedgerTheme.terracotta)
+                Text(integrityMsg)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(LedgerTheme.ink)
+                Spacer()
+                if monitor.integrityReport.corruptedLedgerError == nil {
+                    Button(action: { monitor.requestRepairIntegrity() }) {
+                        Text(localizer.L("Repair / Recover", "修复 / 恢复"))
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .background(RoundedRectangle(cornerRadius: 6, style: .continuous).fill(LedgerTheme.terracotta))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 8.5)
+            .background(LedgerTheme.terracotta.opacity(0.10))
+            Rectangle().fill(LedgerTheme.rowRule).frame(height: 1)
+        }
+
         if let banner = monitor.localizedStatusText(localizer) {
             HStack(spacing: 8) {
                 Image(systemName: monitor.statusIsError ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
@@ -540,7 +721,7 @@ public struct MainDashboardView: View {
             }
             .frame(width: 140, alignment: .trailing)
 
-            // Action Column
+            // Action Column (Orphan Daemons are strictly Read-only in M0 per L5)
             HStack {
                 Spacer()
                 actionControl(for: item)
@@ -555,7 +736,7 @@ public struct MainDashboardView: View {
     @ViewBuilder
     private func actionControl(for item: LaunchItem) -> some View {
         if item.isFrozen {
-            Button(action: { monitor.restoreByLabel(item.label) }) {
+            Button(action: { monitor.requestRestoreByLabel(item.label) }) {
                 Text(localizer.L("Restore", "恢复"))
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(LedgerTheme.forest)
@@ -573,7 +754,7 @@ public struct MainDashboardView: View {
             }
             .buttonStyle(.plain)
         } else if item.domain == .userAgent && !item.isAppleSystem {
-            Button(action: { monitor.freeze(item) }) {
+            Button(action: { monitor.requestFreeze(item) }) {
                 HStack(spacing: 4) {
                     Image(systemName: "snowflake")
                         .font(.system(size: 10, weight: .semibold))
@@ -592,24 +773,6 @@ public struct MainDashboardView: View {
                     RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .strokeBorder(LedgerTheme.cobalt.opacity(0.32), lineWidth: 1)
                 )
-            }
-            .buttonStyle(.plain)
-        } else if item.domain == .orphanDaemon {
-            Button(action: { monitor.terminateOrphan(item) }) {
-                Text(localizer.L("Stop PID", "终止进程"))
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(LedgerTheme.terracotta)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .fixedSize(horizontal: true, vertical: false)
-                    .background(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .fill(LedgerTheme.terracotta.opacity(0.10))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .strokeBorder(LedgerTheme.terracotta.opacity(0.35), lineWidth: 1)
-                    )
             }
             .buttonStyle(.plain)
         } else {
@@ -646,7 +809,7 @@ public struct MainDashboardView: View {
 
                 Spacer()
 
-                Button(action: { monitor.restore(latest) }) {
+                Button(action: { monitor.requestRestore(latest) }) {
                     Text(localizer.L("Restore latest", "恢复最近快照"))
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(LedgerTheme.ink)

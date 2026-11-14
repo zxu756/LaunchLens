@@ -1,68 +1,91 @@
-# LaunchLens `v0.2.0`
+# LaunchLens `v0.2.0` (`m0/honest`)
 
 **[English](README.md)** | **简体中文**
 
-**面向 Apple Silicon 的 macOS 原生后台 `LaunchAgents`、`LaunchDaemons` 与脱离终端 AI/开发孤儿进程常驻内存账本——内置字节级 SHA-256 可逆冻结与一键恢复保险库。**
+**面向 macOS 的用户级 `LaunchAgents` 与后台服务常驻内存（RSS）账本：支持可回滚的 SHA-256 事务型冻结、冲突比对恢复与启动台账自检。**
 
-![LaunchLens 中文主账本面板](docs/screenshot-main-zh.png)
+![LaunchLens 中文主账本面板（演示数据预览）](docs/screenshot-main-zh.png)
 
-在 Apple Silicon Mac 上，遗忘的后台 `LaunchAgents`、静默自动更新器，以及终端关闭后残留的 CLI / MCP 子进程（`PPID == 1` 的 `node`、`python`、`uvx`、`ollama`、`codex` 守护进程）常常悄无声息地吞噬 4–12 GB 统一内存并占用大量本地 `localhost` TCP 端口。
+> **`[演示数据 / DEMO]` 截图说明：** 本文档中的两张界面截图均由 `LaunchLensMonitor.preview()`（`--export-screenshots` / `--demo`）静态示例数据渲染（如 `ai.local.whisper-voice-agent` 占 `4.82 GB`、`com.updater.telemetry-helper` 释放 `412 MB`），并非采自本机真实进程。正常启动（不带 `--demo`）时均实时扫描本机，不载入任何演示数据。
 
-**LaunchLens `v0.2.0`** 是一款体积仅约 1.5 MB 的纯 SwiftPM 原生 macOS 14+ 工具（主账本窗口 + 菜单栏弹窗 + 无头命令行 CLI），**支持应用内实时 `中文 / EN` 双语切换、零第三方依赖、零 `sudo` 提权弹窗、零网络请求**。
+在 macOS 开发环境中，长期驻留的 `LaunchAgents`、全局/系统 `launchd` 配置项以及终端退出后残留的 `PPID == 1` CLI / MCP 进程会持续占用统一内存（RSS）与本地 `localhost` TCP 端口。
 
-## 核心亮点
+**LaunchLens** 是纯 SwiftPM 构建的原生 macOS 14+ 工具（包含主账本窗口、菜单栏弹窗与无头 CLI），支持应用内 `中文 / EN` 实时切换，零第三方依赖、零 `sudo` 提权提示、零网络请求。
 
-- **统一内存占用光谱条** — 直观展示非 Apple 后台常驻物理内存（RSS）在用户级 `LaunchAgents`、系统级守护进程与孤儿开发进程之间的分布占比。
-- **AI 与开发孤儿守护进程检测** — 交叉关联 `launchctl list`、`ps` 与 `lsof`，精准揪出当前用户下脱离父终端（`PPID == 1`）且不受任何 `.plist` 或 `.app` 管理的 `node`、`npx`、`uvx`、`python`、`ollama`、`codex`、`claude`、`opencode` 残留进程及监听端口。
-- **字节级 SHA-256 冻结与恢复保险库** — 冻结用户级 `LaunchAgent` 时，**先**将原始 `.plist` 原字节备份及 SHA-256 摘要写入 `~/Library/Application Support/LaunchLens/Snapshots/` 并完成二次落盘校验，**随后**才执行 `launchctl bootout gui/<uid>` 卸载并移出原配置，重启亦不再自启；一键恢复时自动核验 SHA-256 哈希、原样写回字节并执行 `launchctl bootstrap` 重新引导。
-- **严格安全边界** — `/Library/LaunchDaemons`、`/Library/LaunchAgents` 与 `com.apple.*` 系统服务严格只读保护，绝不索取 `sudo` 权限或改动系统目录。
-- **应用内实时 `中文 / EN` 双语切换 (`v0.2.0`)** — 首次启动自动识别简体中文 macOS 系统语言；主窗口顶栏与菜单栏弹窗顶栏均配备 **`中文 | EN`** 分段切换胶囊，支持菜单栏快捷键 `⇧⌘L`（`切换语言 / Toggle Language`）及命令行 `--lang zh|en` 参数覆盖。
-- **菜单栏常驻弹窗与无头 CLI** — 在菜单栏实时显示非 Apple 后台常驻内存总量，或直接通过终端命令巡检。
+> **`v0.1.0` / `v0.2.0` 用户升级自检提示：** 早期已发布版本在冻结时先删除原 `.plist` 最后才写 `ledger.json`，且未检查 `launchctl` 退出码。升级后可执行 `build/LaunchLens.app/Contents/MacOS/LaunchLens --cli audit --lang zh`（或直接打开应用），自动检查 `~/Library/Application Support/LaunchLens/Snapshots/` 中是否存在中断的「进行中」记录或无记录孤儿备份文件，并通过 **修复 / 恢复** 无损找回。
+
+## 已验证能力 (`m0/honest`)
+
+- **Plist 清单与用户域 RSS 关联**：扫描 `~/Library/LaunchAgents`、`/Library/LaunchAgents` 与 `/Library/LaunchDaemons`，将当前用户域 `launchctl list` 返回的 PID 与 `ps` 常驻内存（RSS）及 `lsof` 监听 TCP 端口关联。
+- **可回滚的 6 步事务型冻结 (`freeze`)**：先通过 `lstat` 校验目标为严格位于 `~/Library/LaunchAgents` 下的普通文件（拒绝符号链接与重复 `label`），在 `Snapshots/` 写入原字节备份并校验读回 SHA-256，**先**向 `ledger.json` 落盘「进行中」（`inProgress`）记录，再调用 `/bin/launchctl bootout gui/<uid>` 并校验退出码为 `0`，随后将原 `.plist` 移入暂存区（不直接删除），最后更新台账为「已冻结」（`frozen`）；任意步骤失败均按逆序回滚并明确报告失败步骤与当前状态。
+- **防覆盖与退出码校验的恢复 (`restore`)**：恢复前先校验备份 SHA-256；若目标位置已存在同名文件（例如软件更新后重建了新配置），拒绝静默覆盖并列出两份文件的路径、字节大小、SHA-256 前缀与键值差异供用户选择；执行 `/bin/launchctl bootstrap` 失败时完整保留备份文件与台账记录。
+- **命令确认弹窗与启动完整性自检**：在主窗口和菜单栏弹窗点击「冻结」或「恢复」时均先弹出确认框，展示即将执行的完整 `/bin/launchctl` 命令与文件路径；启动时自动检测「进行中」记录与孤儿备份文件并提供「修复 / 恢复」入口。
+- **系统服务与孤儿进程只读保护**：`/Library/LaunchDaemons`、`/Library/LaunchAgents` 与 `com.apple.*` 服务严格只读；M0 阶段孤儿进程行同样严格只读（界面已移除「终止进程」按钮）。
+- **实时 `中文 / EN` 切换与规范 CLI 退出码**：支持自动识别中文系统语言、界面 `中文 | EN` 切换胶囊（`⇧⌘L`）及命令行 `--lang zh|en`，严格区分退出码（`0` 成功、`1` 运行或自检异常、`2` 未知子命令或非法参数）。
 
 <p align="center">
-  <img src="docs/screenshot-menubar-zh.png" width="420" alt="LaunchLens 中文菜单栏弹窗" />
+  <img src="docs/screenshot-menubar-zh.png" width="420" alt="LaunchLens 中文菜单栏弹窗（演示数据预览）" />
 </p>
 
-## 安装指南 (`v0.2.0`)
+> **`[演示数据 / DEMO]` 菜单栏图注：** 由 `LaunchLensMonitor.preview()` 静态示例数据导出（`--export-screenshots`）。
 
-### Homebrew Cask 安装（推荐）
+## 当前 M0 口径说明与后续计划（`M1+`）
+
+### M0 测量口径边界
+- **用户域 `launchctl` 内存汇总口径（`L7`）**：非特权 `/bin/launchctl list` 仅返回当前用户 GUI 域服务的 PID。系统域（`/Library/LaunchDaemons`）守护进程在无 root 权限的 `launchctl list` 中不可见 PID（M0 中显示为 `空闲` / `0 MB`），且不由 plist 主进程 PID 直接代表的独立子进程/辅助进程暂未合并计入该服务 RSS。
+- **孤儿进程启发式判定与只读限制（`L4, L5`）**：M0 对未被 `launchctl list` 认领且满足 `uid == currentUID && ppid == 1` 的进程采用命令行子串匹配（`node`、`python`、`uvx`、`mcp` 等），并跳过含 `.app/Contents/` 的路径。由于 macOS 框架版 Python 路径带有 `Python.app/Contents/MacOS/Python` 会被跳过、且参数含同名子串的普通进程可能被命中，M0 阶段孤儿列表仅作只读展示。
+
+### 后续计划（`M1+`）
+- **M1**：按可执行文件名与实际运行脚本重写孤儿进程判定（覆盖框架版 `Python.app`），补齐含全部子进程及按 `Program` 路径反查系统守护进程的内存口径并由 `m1-ledger.sh` 对照验证，提供通过 `LAUNCHLENS_REAL_LAUNCHD=1` 显式开启的真实环境冻结回环测试。
+- **M2**：为残留 MCP/开发孤儿进程标注来源 Agent 会话、提供只读端口与服务查询 MCP 工具、对接 ChronoMac 读取历史内存趋势。
+
+## 安装与编译（macOS 14.0+，Apple Silicon）
+
+### Homebrew Cask 安装 (`v0.2.0`)
 
 ```bash
 brew install --cask zxu756/tap/launchlens
 ```
 
-> 首次打开未经公证的本地 ad-hoc 签名构建包时，如遇 Gatekeeper 提示，可执行一次 `xattr -cr /Applications/LaunchLens.app`。
+> 首次打开未经公证的 ad-hoc 签名构建包时，如遇 Gatekeeper 提示，可执行一次 `xattr -cr /Applications/LaunchLens.app`。
 
-### 从源码编译（macOS 14.0+，Apple Silicon）
+### 从源码编译与范围验证
 
 ```bash
-git clone https://github.com/zxu756/LaunchLens.git
-cd LaunchLens
-swift test --no-parallel
-chmod +x Scripts/build-app.sh
+./Scripts/test.sh scope Freeze Scanner CLI UI
 ./Scripts/build-app.sh
-open build/LaunchLens.app
 ```
 
+编译完成后可在访达中打开 `build/LaunchLens.app`（如需查看带标签的静态演示数据，可传入 `--demo`）。
+
 ## 命令行（Headless CLI）用法
+
+以下全部示例命令均为只读操作，并由 `Scripts/acceptance/readme-commands.sh` 逐条原样回放验证：
 
 ```bash
 # 按实时常驻内存（RSS）降序列出非 Apple 后台服务（支持 --lang zh|en）
 build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang zh
+build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang en
 
-# 仅列出 PPID==1 的开发与 MCP 孤儿守护进程
+# 列出当前检测到的 PPID==1 孤儿候选进程（只读）
 build/LaunchLens.app/Contents/MacOS/LaunchLens --cli orphans --lang zh
+build/LaunchLens.app/Contents/MacOS/LaunchLens --cli orphans --lang en
 
-# 查看快照保险库中经 SHA-256 校验的已冻结配置
+# 查看快照保险库中经 SHA-256 校验的已冻结配置（可通过 --ledger-dir 指定隔离目录）
 build/LaunchLens.app/Contents/MacOS/LaunchLens --cli frozen --lang zh
+build/LaunchLens.app/Contents/MacOS/LaunchLens --cli frozen --lang en
 
-# 导出 2x Retina 中文宣传截图
-build/LaunchLens.app/Contents/MacOS/LaunchLens --export-screenshots docs --lang zh
+# 执行台账完整性自检（检测未完成的进行中记录与孤儿备份文件）
+build/LaunchLens.app/Contents/MacOS/LaunchLens --cli audit --lang zh
+build/LaunchLens.app/Contents/MacOS/LaunchLens --cli audit --lang en
+
+# 查看命令行用法说明
+build/LaunchLens.app/Contents/MacOS/LaunchLens --help --lang zh
 ```
 
 ## 架构与设计规范
 
-关联算法、安全不变量与快照状态机详见 [docs/SPEC.md](docs/SPEC.md)。
+6 步冻结事务、恢复冲突比对与 CLI 退出码约定详见 [docs/SPEC.md](docs/SPEC.md)。
 
 ## 开源协议
 

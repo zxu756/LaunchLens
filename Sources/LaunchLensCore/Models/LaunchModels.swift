@@ -107,31 +107,156 @@ public struct LaunchItem: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+public enum FreezeRecordStatus: String, Codable, Equatable, Sendable {
+    case inProgress
+    case frozen
+
+    @MainActor
+    public func localizedLabel(_ localizer: AppLocalizer) -> String {
+        switch self {
+        case .inProgress:
+            return localizer.L("In progress", "进行中")
+        case .frozen:
+            return localizer.L("Frozen", "已冻结")
+        }
+    }
+}
+
 public struct FreezeSnapshotRecord: Identifiable, Codable, Equatable, Sendable {
     public var id: String
     public var label: String
     public var originalPlistPath: String
     public var snapshotFilePath: String
+    public var stagedPlistPath: String?
     public var sha256Hex: String
     public var frozenAt: Date
     public var rssBytesAtFreeze: Int64
+    public var status: FreezeRecordStatus
 
     public init(
         id: String = UUID().uuidString,
         label: String,
         originalPlistPath: String,
         snapshotFilePath: String,
+        stagedPlistPath: String? = nil,
         sha256Hex: String,
         frozenAt: Date = Date(),
-        rssBytesAtFreeze: Int64 = 0
+        rssBytesAtFreeze: Int64 = 0,
+        status: FreezeRecordStatus = .frozen
     ) {
         self.id = id
         self.label = label
         self.originalPlistPath = originalPlistPath
         self.snapshotFilePath = snapshotFilePath
+        self.stagedPlistPath = stagedPlistPath
         self.sha256Hex = sha256Hex
         self.frozenAt = frozenAt
         self.rssBytesAtFreeze = rssBytesAtFreeze
+        self.status = status
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case label
+        case originalPlistPath
+        case snapshotFilePath
+        case stagedPlistPath
+        case sha256Hex
+        case frozenAt
+        case rssBytesAtFreeze
+        case status
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try c.decode(String.self, forKey: .id)
+        self.label = try c.decode(String.self, forKey: .label)
+        self.originalPlistPath = try c.decode(String.self, forKey: .originalPlistPath)
+        self.snapshotFilePath = try c.decode(String.self, forKey: .snapshotFilePath)
+        self.stagedPlistPath = try c.decodeIfPresent(String.self, forKey: .stagedPlistPath)
+        self.sha256Hex = try c.decode(String.self, forKey: .sha256Hex)
+        self.frozenAt = try c.decode(Date.self, forKey: .frozenAt)
+        self.rssBytesAtFreeze = try c.decodeIfPresent(Int64.self, forKey: .rssBytesAtFreeze) ?? 0
+        self.status = try c.decodeIfPresent(FreezeRecordStatus.self, forKey: .status) ?? .frozen
+    }
+}
+
+public struct RestoreConflictSummary: Codable, Equatable, Sendable {
+    public var label: String
+    public var existingPath: String
+    public var backupPath: String
+    public var existingBytes: Int
+    public var backupBytes: Int
+    public var existingSHA256: String
+    public var backupSHA256: String
+    public var diffSummary: String
+
+    public init(
+        label: String,
+        existingPath: String,
+        backupPath: String,
+        existingBytes: Int,
+        backupBytes: Int,
+        existingSHA256: String,
+        backupSHA256: String,
+        diffSummary: String
+    ) {
+        self.label = label
+        self.existingPath = existingPath
+        self.backupPath = backupPath
+        self.existingBytes = existingBytes
+        self.backupBytes = backupBytes
+        self.existingSHA256 = existingSHA256
+        self.backupSHA256 = backupSHA256
+        self.diffSummary = diffSummary
+    }
+}
+
+public enum RestoreConflictResolution: String, Codable, Equatable, Sendable {
+    case abort
+    case overwriteExistingWithBackup
+    case keepExistingAndClearRecord
+}
+
+public struct LedgerIntegrityReport: Codable, Equatable, Sendable {
+    public var inProgressRecords: [FreezeSnapshotRecord]
+    public var orphanedBackupPaths: [String]
+    public var missingSnapshotRecords: [FreezeSnapshotRecord]
+    public var corruptedLedgerError: String?
+
+    public init(
+        inProgressRecords: [FreezeSnapshotRecord] = [],
+        orphanedBackupPaths: [String] = [],
+        missingSnapshotRecords: [FreezeSnapshotRecord] = [],
+        corruptedLedgerError: String? = nil
+    ) {
+        self.inProgressRecords = inProgressRecords
+        self.orphanedBackupPaths = orphanedBackupPaths
+        self.missingSnapshotRecords = missingSnapshotRecords
+        self.corruptedLedgerError = corruptedLedgerError
+    }
+
+    public var hasIssues: Bool {
+        !inProgressRecords.isEmpty
+            || !orphanedBackupPaths.isEmpty
+            || !missingSnapshotRecords.isEmpty
+            || corruptedLedgerError != nil
+    }
+}
+
+public struct LedgerRecoverySummary: Codable, Equatable, Sendable {
+    public var recoveredInProgressLabels: [String]
+    public var adoptedOrphanLabels: [String]
+    public var cleanedDuplicatePaths: [String]
+
+    public init(
+        recoveredInProgressLabels: [String] = [],
+        adoptedOrphanLabels: [String] = [],
+        cleanedDuplicatePaths: [String] = []
+    ) {
+        self.recoveredInProgressLabels = recoveredInProgressLabels
+        self.adoptedOrphanLabels = adoptedOrphanLabels
+        self.cleanedDuplicatePaths = cleanedDuplicatePaths
     }
 }
 

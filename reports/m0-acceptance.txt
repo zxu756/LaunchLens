@@ -1,0 +1,17 @@
+================================================================
+LaunchLens M0 Acceptance Suite (Hermetic Temp Dir + Fake launchctl)
+================================================================
+[Setup] Building LaunchLens executable...
+[Rows 1-6] Compiling & executing hermetic library probe...
+[Row 1 PASS] Fake bootout exit=36 -> threw error (EN/ZH), plist intact, 0 ledger records, 0 orphan backups.
+[Row 2 PASS] Read-only ledger.json -> threw error (EN/ZH), 0 launchctl calls, original plist intact.
+[Row 3 PASS] Fake bootstrap exit=5 -> threw error (EN/ZH), backup file & ledger record both preserved.
+[Row 4 PASS] Target file conflict -> did NOT overwrite, preserved backup & record, reported both paths & diff (EN/ZH).
+[Row 5 PASS] 1-byte tampered backup -> rejected immediately (SHA-256 mismatch), 0 writes, 0 bootstrap calls.
+[Row 6 PASS] File outside LaunchAgents -> rejected with outsideLaunchAgentsDirectory, file untouched.
+[Row 7 PASS] LaunchLens --cli nosuchcmd --lang en -> exit code 2, stderr: Error: Unknown CLI subcommand 'nosuchcmd'. Supported subcommands: list, orphans, frozen, audit.
+[Row 7 PASS] LaunchLens --cli nosuchcmd --lang zh -> exit code 2, stderr: 错误：未知的命令行子命令「nosuchcmd」。支持的子命令：list、orphans、frozen、audit。
+[Row 8 PASS] Deleting SHA-256 verification in restore turned FreezeLedgerTests/testCorruptedSnapshotRejectedOnRestore RED (exit code 1).
+================================================================
+ALL 8 M0 ACCEPTANCE TABLE CHECKS PASSED (EXIT 0)
+================================================================

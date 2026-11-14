@@ -162,7 +162,8 @@ public enum LaunchScanner {
     ) -> [LaunchItem] {
         var items: [LaunchItem] = []
         var claimedPIDs: Set<Int> = []
-        let frozenSet = Set(frozenRecords.map(\.label))
+        let committedFrozenRecords = frozenRecords.filter { $0.status == .frozen }
+        let frozenSet = Set(committedFrozenRecords.map(\.label))
 
         for meta in plists {
             let lctl = launchctlMap[meta.label]
@@ -196,7 +197,7 @@ public enum LaunchScanner {
 
         // Surface already-frozen items whose .plist was moved into the snapshot vault
         let seenLabels = Set(items.map(\.label))
-        for rec in frozenRecords where !seenLabels.contains(rec.label) {
+        for rec in committedFrozenRecords where !seenLabels.contains(rec.label) {
             items.append(
                 LaunchItem(
                     id: "frozen::\(rec.label)",
@@ -270,11 +271,13 @@ public enum LaunchScanner {
 
     // MARK: - Live Host Scan
 
-    public static func scanLiveHost(ledgerStore: FreezeLedgerStore) -> LaunchSnapshot {
+    public static func scanLiveHost(
+        ledgerStore: FreezeLedgerStore,
+        plistDirectories: [(URL, ServiceDomain)]? = nil
+    ) -> LaunchSnapshot {
         let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser
-        let directories: [(URL, ServiceDomain)] = [
-            (home.appendingPathComponent("Library/LaunchAgents"), .userAgent),
+        let directories: [(URL, ServiceDomain)] = plistDirectories ?? [
+            (ledgerStore.userLaunchAgentsDirectory, .userAgent),
             (URL(fileURLWithPath: "/Library/LaunchAgents"), .globalAgent),
             (URL(fileURLWithPath: "/Library/LaunchDaemons"), .systemDaemon)
         ]
@@ -295,7 +298,7 @@ public enum LaunchScanner {
         let psOut = runCommand("/bin/ps", ["-axo", "pid,ppid,uid,rss,pcpu,args"])
         let lsofOut = runCommand("/usr/sbin/lsof", ["-iTCP", "-sTCP:LISTEN", "-P", "-n", "-F", "pn"])
 
-        let records = ledgerStore.loadRecords()
+        let records = ledgerStore.loadFrozenRecords()
         let items = correlate(
             plists: plists,
             launchctlMap: parseLaunchctlList(lctlOut),

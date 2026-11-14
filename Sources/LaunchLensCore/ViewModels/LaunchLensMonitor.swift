@@ -28,9 +28,9 @@ public enum LaunchStatusBanner: Equatable, Sendable {
     case frozenWithReclaim(label: String, reclaimed: String, shaPrefix: String)
     case frozenSaved(label: String, shaPrefix: String)
     case restored(label: String)
+    case conflictKeptExisting(label: String)
     case missingSnapshot(label: String)
-    case orphanStopped(label: String)
-    case orphanSignalFailed(pid: Int)
+    case integrityRecovered(LedgerRecoverySummary)
     case freezeError(FreezeError)
     case custom(en: String, zh: String)
 
@@ -52,20 +52,22 @@ public enum LaunchStatusBanner: Equatable, Sendable {
                 "Restored \(label) back to LaunchAgents and bootstrapped.",
                 "已将 \(label) 恢复至 LaunchAgents 并重新引导加载。"
             )
+        case let .conflictKeptExisting(label):
+            return localizer.L(
+                "Kept existing plist for \(label) and cleared superseded frozen snapshot.",
+                "已保留 \(label) 当前的新配置文件，并清理旧冻结快照记录。"
+            )
         case let .missingSnapshot(label):
             return localizer.L(
                 "No snapshot record found for \(label).",
                 "未在快照保险库中找到 \(label) 的备份记录。"
             )
-        case let .orphanStopped(label):
+        case let .integrityRecovered(summary):
+            let rCount = summary.recoveredInProgressLabels.count
+            let oCount = summary.adoptedOrphanLabels.count
             return localizer.L(
-                "Sent SIGTERM to orphan process \(label).",
-                "已向孤儿守护进程 \(label) 发送 SIGTERM 终止信号。"
-            )
-        case let .orphanSignalFailed(pid):
-            return localizer.L(
-                "Could not signal PID \(pid); process may have already exited.",
-                "无法向 PID \(pid) 发送信号，该进程可能已自行退出。"
+                "Ledger recovery completed: \(rCount) interrupted transaction(s) resolved, \(oCount) orphan backup(s) recovered to vault.",
+                "台账修复完成：已处理 \(rCount) 条中断事务，已将 \(oCount) 个孤儿备份纳入保险库。"
             )
         case let .freezeError(err):
             return err.localizedMessage(localizer)
@@ -75,9 +77,68 @@ public enum LaunchStatusBanner: Equatable, Sendable {
     }
 }
 
+public enum PendingConfirmationAction: Identifiable, Equatable, Sendable {
+    case freeze(LaunchItem)
+    case restore(FreezeSnapshotRecord)
+    case resolveRestoreConflict(record: FreezeSnapshotRecord, conflict: RestoreConflictSummary)
+    case repairIntegrity(LedgerIntegrityReport)
+
+    public var id: String {
+        switch self {
+        case .freeze(let item):
+            return "freeze::\(item.id)"
+        case .restore(let rec):
+            return "restore::\(rec.id)"
+        case .resolveRestoreConflict(let rec, _):
+            return "conflict::\(rec.id)"
+        case .repairIntegrity:
+            return "repair::integrity"
+        }
+    }
+}
+
+public struct ActionConfirmationDetails: Equatable, Sendable {
+    public var title: String
+    public var summary: String
+    public var exactCommand: String
+    public var sourcePathLabel: String
+    public var sourcePath: String
+    public var targetPathLabel: String
+    public var targetPath: String
+    public var diffSummary: String?
+    public var confirmTitle: String
+    public var cancelTitle: String
+
+    public init(
+        title: String,
+        summary: String,
+        exactCommand: String,
+        sourcePathLabel: String,
+        sourcePath: String,
+        targetPathLabel: String,
+        targetPath: String,
+        diffSummary: String? = nil,
+        confirmTitle: String,
+        cancelTitle: String
+    ) {
+        self.title = title
+        self.summary = summary
+        self.exactCommand = exactCommand
+        self.sourcePathLabel = sourcePathLabel
+        self.sourcePath = sourcePath
+        self.targetPathLabel = targetPathLabel
+        self.targetPath = targetPath
+        self.diffSummary = diffSummary
+        self.confirmTitle = confirmTitle
+        self.cancelTitle = cancelTitle
+    }
+}
+
 @MainActor
 public final class LaunchLensMonitor: ObservableObject {
     @Published public var snapshot: LaunchSnapshot
+    @Published public var integrityReport: LedgerIntegrityReport
+    @Published public var pendingConfirmation: PendingConfirmationAction?
     @Published public var selectedFilter: LaunchFilterTab = .all
     @Published public var searchQuery: String = ""
     @Published public var showAppleSystem: Bool = false
@@ -86,7 +147,7 @@ public final class LaunchLensMonitor: ObservableObject {
     @Published public var statusIsError: Bool = false
 
     public let isStaticPreview: Bool
-    private let ledgerStore: FreezeLedgerStore
+    public let ledgerStore: FreezeLedgerStore
     private var refreshTimer: Timer?
 
     public init(
@@ -99,8 +160,12 @@ public final class LaunchLensMonitor: ObservableObject {
         self.isStaticPreview = isStaticPreview
         if let snapshot {
             self.snapshot = snapshot
+            self.integrityReport = isStaticPreview
+                ? LedgerIntegrityReport()
+                : ledgerStore.auditInterruptedTransactionsAndOrphanBackups()
         } else {
             self.snapshot = LaunchScanner.scanLiveHost(ledgerStore: ledgerStore)
+            self.integrityReport = ledgerStore.auditInterruptedTransactionsAndOrphanBackups()
         }
 
         if !isStaticPreview, let interval = autoRefreshSeconds, interval > 0 {
@@ -115,6 +180,7 @@ public final class LaunchLensMonitor: ObservableObject {
     public func refresh() {
         guard !isStaticPreview else { return }
         snapshot = LaunchScanner.scanLiveHost(ledgerStore: ledgerStore)
+        integrityReport = ledgerStore.auditInterruptedTransactionsAndOrphanBackups()
     }
 
     public func localizedStatusText(_ localizer: AppLocalizer) -> String? {
@@ -122,6 +188,23 @@ public final class LaunchLensMonitor: ObservableObject {
             return statusBanner.localizedText(localizer)
         }
         return statusMessage
+    }
+
+    public func localizedIntegrityBannerText(_ localizer: AppLocalizer) -> String? {
+        guard integrityReport.hasIssues else { return nil }
+        if let corrupt = integrityReport.corruptedLedgerError {
+            return localizer.L(
+                "Startup check detected corrupted ledger (\(corrupt)).",
+                "启动自检发现台账文件损坏（\(corrupt)）。"
+            )
+        }
+        let inProg = integrityReport.inProgressRecords.count
+        let orphans = integrityReport.orphanedBackupPaths.count
+        let missing = integrityReport.missingSnapshotRecords.count
+        return localizer.L(
+            "Startup integrity check: \(inProg) interrupted 'inProgress' transaction(s), \(orphans) orphaned backup plist(s), \(missing) missing backup(s).",
+            "启动完整性自检：发现 \(inProg) 条未完成的「进行中」事务、\(orphans) 个无记录孤儿备份文件、\(missing) 条缺失备份记录。"
+        )
     }
 
     public var filteredItems: [LaunchItem] {
@@ -165,64 +248,226 @@ public final class LaunchLensMonitor: ObservableObject {
         )
     }
 
+    // MARK: - M0 Item 5: Confirmation Request & Preview Flow
+
+    public func requestFreeze(_ item: LaunchItem) {
+        pendingConfirmation = .freeze(item)
+    }
+
+    public func requestRestore(_ record: FreezeSnapshotRecord) {
+        pendingConfirmation = .restore(record)
+    }
+
+    public func requestRestoreByLabel(_ label: String) {
+        let records = snapshot.frozenRecords.isEmpty ? ledgerStore.loadFrozenRecords() : snapshot.frozenRecords
+        guard let record = records.first(where: { $0.label == label }) else {
+            statusIsError = true
+            statusBanner = .missingSnapshot(label: label)
+            statusMessage = statusBanner?.localizedText(AppLocalizer(fixedLanguage: .en))
+            return
+        }
+        pendingConfirmation = .restore(record)
+    }
+
+    public func requestRepairIntegrity() {
+        guard integrityReport.hasIssues else { return }
+        pendingConfirmation = .repairIntegrity(integrityReport)
+    }
+
+    public func cancelPendingConfirmation() {
+        pendingConfirmation = nil
+    }
+
+    public func confirmationDetails(
+        for action: PendingConfirmationAction,
+        localizer: AppLocalizer
+    ) -> ActionConfirmationDetails {
+        switch action {
+        case .freeze(let item):
+            let plistPath = item.plistPath ?? "<missing plist>"
+            let cmd = ledgerStore.bootoutCommandPreview(plistPath: plistPath)
+            return ActionConfirmationDetails(
+                title: localizer.L("Confirm Freeze LaunchAgent", "确认冻结 LaunchAgent"),
+                summary: localizer.L(
+                    "LaunchLens will write and SHA-256 verify a backup copy, record an inProgress transaction, run launchctl bootout, and move the plist into the vault.",
+                    "LaunchLens 将先写入备份并校验 SHA-256，记录「进行中」事务，执行 launchctl bootout 卸载服务，再将原 plist 移至保险库。"
+                ),
+                exactCommand: cmd,
+                sourcePathLabel: localizer.L("Active plist", "当前配置文件"),
+                sourcePath: plistPath,
+                targetPathLabel: localizer.L("Snapshot vault", "快照保险库目录"),
+                targetPath: ledgerStore.snapshotsDirectory.path,
+                diffSummary: nil,
+                confirmTitle: localizer.L("Freeze Service", "确认冻结"),
+                cancelTitle: localizer.L("Cancel", "取消")
+            )
+
+        case .restore(let rec):
+            let cmd = ledgerStore.bootstrapCommandPreview(plistPath: rec.originalPlistPath)
+            return ActionConfirmationDetails(
+                title: localizer.L("Confirm Restore LaunchAgent", "确认恢复 LaunchAgent"),
+                summary: localizer.L(
+                    "LaunchLens will verify backup SHA-256 (\(rec.sha256Hex.prefix(12))), refuse silent overwrite if a file already exists, copy the plist back, and run launchctl bootstrap.",
+                    "LaunchLens 将先校验备份 SHA-256（\(rec.sha256Hex.prefix(12))），检测目标路径冲突（不静默覆盖），写回原字节并执行 launchctl bootstrap。"
+                ),
+                exactCommand: cmd,
+                sourcePathLabel: localizer.L("Verified backup", "已校验备份文件"),
+                sourcePath: rec.snapshotFilePath,
+                targetPathLabel: localizer.L("Restore destination", "恢复目标路径"),
+                targetPath: rec.originalPlistPath,
+                diffSummary: nil,
+                confirmTitle: localizer.L("Restore & Bootstrap", "确认恢复并加载"),
+                cancelTitle: localizer.L("Cancel", "取消")
+            )
+
+        case let .resolveRestoreConflict(rec, conflict):
+            let cmd = ledgerStore.bootstrapCommandPreview(plistPath: rec.originalPlistPath)
+            return ActionConfirmationDetails(
+                title: localizer.L("Target Plist Conflict Detected", "检测到目标配置文件冲突"),
+                summary: localizer.L(
+                    "A file already exists at the restore path (\(conflict.existingBytes) B, sha256:\(conflict.existingSHA256.prefix(10))) vs frozen backup (\(conflict.backupBytes) B, sha256:\(conflict.backupSHA256.prefix(10))). Choose how to proceed:",
+                    "恢复目标路径已存在同名文件（\(conflict.existingBytes) 字节，sha256:\(conflict.existingSHA256.prefix(10))），与冻结备份（\(conflict.backupBytes) 字节，sha256:\(conflict.backupSHA256.prefix(10))）不一致。请选择处理方式："
+                ),
+                exactCommand: cmd,
+                sourcePathLabel: localizer.L("Frozen backup", "冻结备份文件"),
+                sourcePath: conflict.backupPath,
+                targetPathLabel: localizer.L("Existing file on disk", "磁盘现有文件"),
+                targetPath: conflict.existingPath,
+                diffSummary: conflict.diffSummary,
+                confirmTitle: localizer.L("Overwrite with Backup & Bootstrap", "用冻结备份覆盖并加载"),
+                cancelTitle: localizer.L("Cancel (Keep Untouched)", "取消（保持现状）")
+            )
+
+        case .repairIntegrity(let report):
+            let labels = report.inProgressRecords.map(\.label).joined(separator: ", ")
+            let cmdNote = report.inProgressRecords.isEmpty
+                ? localizer.L("Adopt \(report.orphanedBackupPaths.count) orphaned backup plist(s) into ledger.json", "将 \(report.orphanedBackupPaths.count) 个孤儿备份 plist 纳入 ledger.json")
+                : "/bin/launchctl bootstrap gui/\(ledgerStore.uid) <interrupted-plist> (\(labels))"
+            return ActionConfirmationDetails(
+                title: localizer.L("Repair Interrupted Ledger & Orphan Backups", "修复中断事务与孤儿备份"),
+                summary: localizer.L(
+                    "Recovers \(report.inProgressRecords.count) interrupted inProgress transaction(s) and adopts \(report.orphanedBackupPaths.count) untracked backup plist(s) into the snapshot vault without deleting user data.",
+                    "无损恢复 \(report.inProgressRecords.count) 条中断的「进行中」事务，并将 \(report.orphanedBackupPaths.count) 个未登记的孤儿备份纳入快照保险库，不删除用户数据。"
+                ),
+                exactCommand: cmdNote,
+                sourcePathLabel: localizer.L("Snapshots directory", "快照备份目录"),
+                sourcePath: ledgerStore.snapshotsDirectory.path,
+                targetPathLabel: localizer.L("Ledger file", "台账文件"),
+                targetPath: ledgerStore.ledgerFileURL.path,
+                diffSummary: nil,
+                confirmTitle: localizer.L("Repair / Recover", "修复 / 恢复"),
+                cancelTitle: localizer.L("Cancel", "取消")
+            )
+        }
+    }
+
+    public func confirmPendingAction() {
+        guard let action = pendingConfirmation else { return }
+        pendingConfirmation = nil
+
+        switch action {
+        case .freeze(let item):
+            executeFreezeConfirmed(item)
+        case .restore(let record):
+            executeRestoreConfirmed(record, conflictResolution: .abort)
+        case .resolveRestoreConflict(let record, _):
+            executeRestoreConfirmed(record, conflictResolution: .overwriteExistingWithBackup)
+        case .repairIntegrity:
+            executeRepairIntegrityConfirmed()
+        }
+    }
+
+    public func resolveConflictKeepExisting() {
+        guard case let .resolveRestoreConflict(record, _) = pendingConfirmation else { return }
+        pendingConfirmation = nil
+        executeRestoreConfirmed(record, conflictResolution: .keepExistingAndClearRecord)
+    }
+
+    // MARK: - Direct Validated Execution (Used after confirmation)
+
     public func freeze(_ item: LaunchItem) {
+        executeFreezeConfirmed(item)
+    }
+
+    public func restore(
+        _ record: FreezeSnapshotRecord,
+        conflictResolution: RestoreConflictResolution = .abort
+    ) {
+        executeRestoreConfirmed(record, conflictResolution: conflictResolution)
+    }
+
+    public func repairLedgerIntegrity() {
+        executeRepairIntegrityConfirmed()
+    }
+
+    private func executeFreezeConfirmed(_ item: LaunchItem) {
         do {
             let rec = try ledgerStore.freeze(item: item)
             let prefix = String(rec.sha256Hex.prefix(10))
             statusIsError = false
             statusBanner = .frozenSaved(label: rec.label, shaPrefix: prefix)
-            statusMessage = statusBanner?.localizedText(.shared)
+            statusMessage = statusBanner?.localizedText(AppLocalizer(fixedLanguage: .en))
             refresh()
         } catch let freezeErr as FreezeError {
             statusIsError = true
             statusBanner = .freezeError(freezeErr)
             statusMessage = freezeErr.errorDescription
+            integrityReport = ledgerStore.auditInterruptedTransactionsAndOrphanBackups()
         } catch {
             statusIsError = true
             statusBanner = .custom(en: error.localizedDescription, zh: error.localizedDescription)
             statusMessage = error.localizedDescription
+            integrityReport = ledgerStore.auditInterruptedTransactionsAndOrphanBackups()
         }
     }
 
-    public func restore(_ record: FreezeSnapshotRecord) {
+    private func executeRestoreConfirmed(
+        _ record: FreezeSnapshotRecord,
+        conflictResolution: RestoreConflictResolution
+    ) {
         do {
-            try ledgerStore.restore(recordID: record.id)
+            try ledgerStore.restore(recordID: record.id, conflictResolution: conflictResolution)
             statusIsError = false
-            statusBanner = .restored(label: record.label)
-            statusMessage = statusBanner?.localizedText(.shared)
+            if conflictResolution == .keepExistingAndClearRecord {
+                statusBanner = .conflictKeptExisting(label: record.label)
+            } else {
+                statusBanner = .restored(label: record.label)
+            }
+            statusMessage = statusBanner?.localizedText(AppLocalizer(fixedLanguage: .en))
             refresh()
         } catch let freezeErr as FreezeError {
             statusIsError = true
             statusBanner = .freezeError(freezeErr)
             statusMessage = freezeErr.errorDescription
+            if case .restoreTargetConflict(let conflict) = freezeErr, conflictResolution == .abort {
+                pendingConfirmation = .resolveRestoreConflict(record: record, conflict: conflict)
+            }
+            integrityReport = ledgerStore.auditInterruptedTransactionsAndOrphanBackups()
         } catch {
             statusIsError = true
             statusBanner = .custom(en: error.localizedDescription, zh: error.localizedDescription)
             statusMessage = error.localizedDescription
+            integrityReport = ledgerStore.auditInterruptedTransactionsAndOrphanBackups()
         }
     }
 
-    public func restoreByLabel(_ label: String) {
-        guard let record = snapshot.frozenRecords.first(where: { $0.label == label }) else {
-            statusIsError = true
-            statusBanner = .missingSnapshot(label: label)
-            statusMessage = statusBanner?.localizedText(.shared)
-            return
-        }
-        restore(record)
-    }
-
-    public func terminateOrphan(_ item: LaunchItem) {
-        guard item.domain == .orphanDaemon, let pid = item.pid else { return }
-        if ledgerStore.terminateOrphan(pid: pid) {
+    private func executeRepairIntegrityConfirmed() {
+        do {
+            let summary = try ledgerStore.recoverInterruptedAndOrphanBackups()
             statusIsError = false
-            statusBanner = .orphanStopped(label: item.label)
-            statusMessage = statusBanner?.localizedText(.shared)
+            statusBanner = .integrityRecovered(summary)
+            statusMessage = statusBanner?.localizedText(AppLocalizer(fixedLanguage: .en))
             refresh()
-        } else {
+        } catch let freezeErr as FreezeError {
             statusIsError = true
-            statusBanner = .orphanSignalFailed(pid: pid)
-            statusMessage = statusBanner?.localizedText(.shared)
+            statusBanner = .freezeError(freezeErr)
+            statusMessage = freezeErr.errorDescription
+            integrityReport = ledgerStore.auditInterruptedTransactionsAndOrphanBackups()
+        } catch {
+            statusIsError = true
+            statusBanner = .custom(en: error.localizedDescription, zh: error.localizedDescription)
+            statusMessage = error.localizedDescription
+            integrityReport = ledgerStore.auditInterruptedTransactionsAndOrphanBackups()
         }
     }
 
@@ -234,7 +479,7 @@ public final class LaunchLensMonitor: ObservableObject {
         return raw
     }
 
-    // MARK: - Deterministic Marketing & Test Preview
+    // MARK: - Deterministic Demo Preview (Explicit --demo / ScreenshotExporter only)
 
     public static func preview() -> LaunchLensMonitor {
         let now = Date(timeIntervalSince1970: 1_794_556_800)
@@ -245,7 +490,8 @@ public final class LaunchLensMonitor: ObservableObject {
             snapshotFilePath: "~/Library/Application Support/LaunchLens/Snapshots/com.updater.telemetry-helper-snap-01.plist",
             sha256Hex: "9f4c82b1e07a3d56c4189a02e7b11f88c04d6321a8e5b9704c2d193f80a65e12",
             frozenAt: now.addingTimeInterval(-7200),
-            rssBytesAtFreeze: 432_013_312
+            rssBytesAtFreeze: 432_013_312,
+            status: .frozen
         )
 
         let items: [LaunchItem] = [
@@ -256,7 +502,7 @@ public final class LaunchLensMonitor: ObservableObject {
                 plistPath: "~/Library/LaunchAgents/ai.local.whisper-voice-agent.plist",
                 programCommand: "/opt/homebrew/bin/whisper-server --model large-v3-turbo --port 8787",
                 pid: 31402,
-                rssBytes: 5_175_435_264, // 4.82 GB
+                rssBytes: 5_175_435_264,
                 cpuPercent: 6.4,
                 listeningPorts: [8787],
                 runAtLoad: true,
@@ -269,7 +515,7 @@ public final class LaunchLensMonitor: ObservableObject {
                 plistPath: "~/Library/LaunchAgents/io.ollama.runner.plist",
                 programCommand: "/opt/homebrew/opt/ollama/bin/ollama serve",
                 pid: 19844,
-                rssBytes: 2_834_678_415, // 2.64 GB
+                rssBytes: 2_834_678_415,
                 cpuPercent: 1.8,
                 listeningPorts: [11434],
                 runAtLoad: true,
@@ -282,7 +528,7 @@ public final class LaunchLensMonitor: ObservableObject {
                 plistPath: nil,
                 programCommand: "node /opt/homebrew/lib/node_modules/@playwright/mcp/cli.js --port 9222",
                 pid: 48210,
-                rssBytes: 935_329_792, // 892 MB
+                rssBytes: 935_329_792,
                 cpuPercent: 3.1,
                 listeningPorts: [9222]
             ),
@@ -293,7 +539,7 @@ public final class LaunchLensMonitor: ObservableObject {
                 plistPath: "/Library/LaunchDaemons/com.docker.vmnetd.plist",
                 programCommand: "/Library/PrivilegedHelperTools/com.docker.vmnetd",
                 pid: 612,
-                rssBytes: 679_477_248, // 648 MB
+                rssBytes: 679_477_248,
                 cpuPercent: 0.5,
                 listeningPorts: [],
                 runAtLoad: true,
@@ -306,7 +552,7 @@ public final class LaunchLensMonitor: ObservableObject {
                 plistPath: nil,
                 programCommand: "python3 -m scholar_mcp.server --transport stdio",
                 pid: 51094,
-                rssBytes: 333_447_168, // 318 MB
+                rssBytes: 333_447_168,
                 cpuPercent: 0.4,
                 listeningPorts: []
             ),
@@ -317,7 +563,7 @@ public final class LaunchLensMonitor: ObservableObject {
                 plistPath: "~/Library/LaunchAgents/homebrew.mxcl.postgresql@16.plist",
                 programCommand: "/opt/homebrew/opt/postgresql@16/bin/postgres -D /opt/homebrew/var/postgresql@16",
                 pid: 1409,
-                rssBytes: 255_852_544, // 244 MB
+                rssBytes: 255_852_544,
                 cpuPercent: 0.2,
                 listeningPorts: [5432],
                 runAtLoad: true,
@@ -330,7 +576,7 @@ public final class LaunchLensMonitor: ObservableObject {
                 plistPath: "/Library/LaunchAgents/org.pqrs.karabiner.agent.plist",
                 programCommand: "/Library/Application Support/org.pqrs/Karabiner-Elements/bin/karabiner_grabber",
                 pid: 988,
-                rssBytes: 96_468_992, // 92 MB
+                rssBytes: 96_468_992,
                 cpuPercent: 0.3,
                 listeningPorts: [],
                 runAtLoad: true,
@@ -352,14 +598,22 @@ public final class LaunchLensMonitor: ObservableObject {
             )
         ]
 
-        let snap = LaunchSnapshot(capturedAt: now, items: items, frozenRecords: [frozenRecord])
-        let monitor = LaunchLensMonitor(snapshot: snap, isStaticPreview: true, autoRefreshSeconds: nil)
-        monitor.statusBanner = .frozenWithReclaim(
-            label: "com.updater.telemetry-helper",
-            reclaimed: "412 MB",
-            shaPrefix: "9f4c82b1e0"
+        let inertStore = FreezeLedgerStore(
+            vaultDirectory: FileManager.default.temporaryDirectory.appendingPathComponent("LaunchLensInertPreview"),
+            userLaunchAgentsDirectory: FileManager.default.temporaryDirectory.appendingPathComponent("LaunchLensInertAgents")
         )
-        monitor.statusMessage = monitor.statusBanner?.localizedText(.shared)
+        let snap = LaunchSnapshot(capturedAt: now, items: items, frozenRecords: [frozenRecord])
+        let monitor = LaunchLensMonitor(
+            snapshot: snap,
+            ledgerStore: inertStore,
+            isStaticPreview: true,
+            autoRefreshSeconds: nil
+        )
+        monitor.statusBanner = .custom(
+            en: "[DEMO] Synthetic preview dataset — Frozen com.updater.telemetry-helper (412 MB reclaimed, SHA-256 9f4c82b1e0 verified).",
+            zh: "[演示数据] 静态示例数据集 — 已冻结 com.updater.telemetry-helper（释放 412 MB，SHA-256 9f4c82b1e0 校验通过）。"
+        )
+        monitor.statusMessage = monitor.statusBanner?.localizedText(AppLocalizer(fixedLanguage: .en))
         return monitor
     }
 }
