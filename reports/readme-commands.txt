@@ -12,12 +12,12 @@ SKIPPED (external Homebrew Cask install requires network and modifies /Applicati
     ↳ Testing Library Version: 2403
     ↳ Target Platform: arm64e-apple-macos14.0
     ◇ Suite "CLIRunnerTests" started.
-    ... (93 lines omitted) ...
-    ✔ Test run with 43 tests in 4 suites passed after 10.701 seconds.
+    ... (101 lines omitted) ...
+    ✔ Test run with 47 tests in 4 suites passed after 3.543 seconds.
     
     Building for debugging...
     [1 / 12]
-    Build complete! (0.26秒)
+    Build complete! (0.36秒)
     [ASSERT PASS] exit=0, verified output pattern (exact_all)
 
 ==> [3/16] ./Scripts/build-app.sh
@@ -25,7 +25,7 @@ SKIPPED (external Homebrew Cask install requires network and modifies /Applicati
     Building for production...
     [3 / 11] LaunchLensCore
     [5 / 12] LaunchLensCore
-    Build complete! (8.91秒)
+    Build complete! (7.17秒)
     ==> Assembling <REPO_ROOT>/build/LaunchLens.app...
     ==> Generating AppIcon.icns...
     ==> Ad-hoc signing & verifying...
@@ -35,35 +35,37 @@ SKIPPED (external Homebrew Cask install requires network and modifies /Applicati
     [ASSERT PASS] exit=0, verified output pattern (exact_all)
 
 ==> [4/16] build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --agents-dir "${AGENTS_DIR:-.}" --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang en
-    Total Non-Apple Background RSS (service trees + orphans): 0 MB (0 running, 0 orphans)
+    Total Non-Apple Background RSS (service trees + orphans): 2.2 MB (1 running, 1 orphans)
+    2.2 MB      PID 74202   [Orphan daemon]  python3 / <SCRUBBED_TARGET> (PID 74202)
     0 MB        IDLE        [User agent]  io.fixture.readme-agent
     [ASSERT PASS] exit=0, verified output pattern (exact_all)
 
 ==> [5/16] build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --agents-dir "${AGENTS_DIR:-.}" --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang zh
-    非 Apple 后台常驻内存总计（服务进程树 + 孤儿进程）：0 MB（0 项运行中，0 个孤儿进程）
+    非 Apple 后台常驻内存总计（服务进程树 + 孤儿进程）：2.2 MB（1 项运行中，1 个孤儿进程）
+    2.2 MB      PID 74202   [孤儿进程]  python3 / <SCRUBBED_TARGET> (PID 74202)
     0 MB        空闲          [用户代理]  io.fixture.readme-agent
     [ASSERT PASS] exit=0, verified output pattern (exact_all)
 
 ==> [6/16] build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --json --agents-dir "${AGENTS_DIR:-.}" --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang en
     {
-      "capturedAt" : "2026-11-15T04:51:46Z",
+      "capturedAt" : "2026-11-15T11:03:07Z",
       "frozenRecords" : [
     
       ],
-    ... (39 lines omitted) ...
+    ... (70 lines omitted) ...
         }
       ],
-      "totalBackgroundRSSBytes" : 0,
-      "totalListeningPortCount" : 0
+      "totalBackgroundRSSBytes" : 2277376,
+      "totalListeningPortCount" : 1
     }
     [ASSERT PASS] exit=0, verified output pattern (exact_all)
 
 ==> [7/16] build/LaunchLens.app/Contents/MacOS/LaunchLens --cli orphans --agents-dir "${AGENTS_DIR:-.}" --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang en
-    No orphaned developer/AI daemons detected.
+    2.2 MB      PID 74202    python3 / <SCRUBBED_TARGET> (PID 74202)  :55381
     [ASSERT PASS] exit=0, verified output pattern (regex)
 
 ==> [8/16] build/LaunchLens.app/Contents/MacOS/LaunchLens --cli orphans --agents-dir "${AGENTS_DIR:-.}" --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang zh
-    未检测到脱离终端的开发/AI 孤儿守护进程。
+    2.2 MB      PID 74202    python3 / <SCRUBBED_TARGET> (PID 74202)  :55381
     [ASSERT PASS] exit=0, verified output pattern (regex)
 
 ==> [9/16] build/LaunchLens.app/Contents/MacOS/LaunchLens --cli frozen --ledger-dir "${LEDGER_DIR:-${TMPDIR:-/tmp}}" --lang en
@@ -84,12 +86,12 @@ SKIPPED (external Homebrew Cask install requires network and modifies /Applicati
 
 ==> [13/16] build/LaunchLens.app/Contents/MacOS/LaunchLens --help --lang en
     Usage: LaunchLens --cli [list|orphans|frozen|audit] [--json] [--lang en|zh] [--ledger-dir <dir>] [--agents-dir <dir>]
-           LaunchLens --cli [freeze <label>|restore <id-or-label>|repair] [--json] [--lang en|zh] [--ledger-dir <dir>] [--agents-dir <dir>]
+           LaunchLens --cli [freeze <label>|restore <id-or-label>|repair] --confirm [--json] [--lang en|zh] [--ledger-dir <dir>] [--agents-dir <dir>]
     [ASSERT PASS] exit=0, verified output pattern (exact_all)
 
 ==> [14/16] build/LaunchLens.app/Contents/MacOS/LaunchLens --help --lang zh
     用法：LaunchLens --cli [list|orphans|frozen|audit] [--json] [--lang en|zh] [--ledger-dir <目录>] [--agents-dir <目录>]
-          LaunchLens --cli [freeze <服务标识>|restore <记录ID或服务标识>|repair] [--json] [--lang en|zh] [--ledger-dir <目录>] [--agents-dir <目录>]
+          LaunchLens --cli [freeze <服务标识>|restore <记录ID或服务标识>|repair] --confirm [--json] [--lang en|zh] [--ledger-dir <目录>] [--agents-dir <目录>]
     [ASSERT PASS] exit=0, verified output pattern (exact_all)
 
 ==> [15/16] build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang en

@@ -256,6 +256,11 @@ text = re.sub(r"/private/var/folders/[^\s\"')]+", "<TMPDIR>", text)
 text = re.sub(r"/var/folders/[^\s\"')]+", "<TMPDIR>", text)
 text = re.sub(r"/private/tmp/[^\s\"')]+", "<TMP>", text)
 text = re.sub(r"/tmp/[^\s\"')]+", "<TMP>", text)
+text = re.sub(
+    r"(PID \d+\s+(?:\[(?:Orphan daemon|孤儿进程)\]\s+)?[A-Za-z0-9._+-]+\s*/\s*)([^\s(]+)",
+    r"\1<SCRUBBED_TARGET>",
+    text,
+)
 
 out_path.write_text(text, encoding="utf-8")
 PYEOF

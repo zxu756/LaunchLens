@@ -43,8 +43,8 @@ LaunchLens is a local, zero-network SwiftPM macOS 14+ application (main ledger w
 ## 4. Targets & CLI Exit Codes (`L9`, Unreleased after `v0.2.0`)
 - `LaunchLensCore`: `Models`, `Scanners`, `Services`, `CLI`, `Localization`, `ViewModels`, `Views`.
 - `LaunchLens`: Pre-GUI CLI entrypoint (`LaunchLensEntrypoint`) + SwiftUI app (`--demo` loads synthetic preview data with `[DEMO]` badges; default launch scans live host).
-- CLI subcommands: `list`, `orphans`, `frozen`, `audit`, `freeze <label>`, `restore <id-or-label>`, `repair` (`--json`, `--lang en|zh`, `--ledger-dir <dir>`, `--agents-dir <dir>`, `--help` / `-h`).
+- CLI subcommands: `list`, `orphans`, `frozen`, `audit`, and confirmation-gated write subcommands `freeze <label> --confirm`, `restore <id-or-label> --confirm`, `repair --confirm` (`--json`, `--lang en|zh`, `--ledger-dir <dir>`, `--agents-dir <dir>`, `--help` / `-h`). Invoking `freeze`, `restore`, or `repair` without `--confirm` performs zero writes and zero `launchctl` mutations, prints the exact command and file paths to `stderr`, and exits with code `2`.
 - CLI exit codes:
   - `0`: Command succeeded.
   - `1`: Runtime, filesystem, corrupted ledger, freeze/restore/repair failure, or `audit` integrity error.
-  - `2`: Unknown subcommand (`--cli nosuchcmd`), missing required target argument, unknown option flag, or invalid argument value.
+  - `2`: Unknown subcommand (`--cli nosuchcmd`), missing required target argument, missing `--confirm` on write subcommands, unknown option flag, or invalid argument value.

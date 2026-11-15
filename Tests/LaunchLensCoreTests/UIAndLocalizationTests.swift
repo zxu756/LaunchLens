@@ -288,4 +288,50 @@ struct UIAndLocalizationTests {
         #expect(!monitor.integrityReport.hasIssues)
         #expect(store.loadFrozenRecords().map(\.label) == ["io.ui.orphan"])
     }
+
+    @Test("LR5: README.md and README.zh-CN.md preserve [DEMO] screenshot captions, document --confirm, and match recorded m1-ledger numbers and excluded-port reasons")
+    func testLR5ReadmeDemoCaptionsConfirmGateAndUpdatedLedgerBreakdown() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let readmeEN = try String(contentsOf: repoRoot.appendingPathComponent("README.md"), encoding: .utf8)
+        let readmeZH = try String(contentsOf: repoRoot.appendingPathComponent("README.zh-CN.md"), encoding: .utf8)
+        let ledgerReport = try String(contentsOf: repoRoot.appendingPathComponent("reports/m1-ledger.txt"), encoding: .utf8)
+
+        // 1. Preserve [DEMO] captions on both screenshots without launching GUI
+        #expect(readmeEN.contains("docs/screenshot-main.png"))
+        #expect(readmeEN.contains("docs/screenshot-menubar.png"))
+        #expect(readmeEN.contains("[DEMO]` Screenshot Notice"))
+        #expect(readmeEN.contains("[DEMO]` Menu Bar Caption"))
+
+        #expect(readmeZH.contains("docs/screenshot-main-zh.png"))
+        #expect(readmeZH.contains("docs/screenshot-menubar-zh.png"))
+        #expect(readmeZH.contains("[演示数据 / DEMO]` 截图说明"))
+        #expect(readmeZH.contains("[演示数据 / DEMO]` 菜单栏图注"))
+
+        // 2. Document LR4 --confirm gate on write subcommands
+        #expect(readmeEN.contains("--confirm"))
+        #expect(readmeZH.contains("--confirm"))
+
+        // 3. Match recorded m1-ledger.txt numbers and explicit excluded-listener breakdown
+        let rssMatch = try #require(
+            ledgerReport.range(of: #"services_rss=[0-9.]+ MB"#, options: .regularExpression),
+            "Expected services_rss=<X> MB in reports/m1-ledger.txt"
+        )
+        let recordedServicesRSS = String(ledgerReport[rssMatch]).replacingOccurrences(of: "services_rss=", with: "")
+
+        let exclMatch = try #require(
+            ledgerReport.range(of: #"excluded_listener_pids=[0-9]+"#, options: .regularExpression),
+            "Expected excluded_listener_pids=<N> in reports/m1-ledger.txt"
+        )
+        let recordedExcludedCount = String(ledgerReport[exclMatch]).replacingOccurrences(of: "excluded_listener_pids=", with: "")
+
+        #expect(readmeEN.contains(recordedServicesRSS))
+        #expect(readmeZH.contains(recordedServicesRSS))
+        #expect(readmeEN.contains("**\(recordedExcludedCount)** excluded listener PIDs"))
+        #expect(readmeZH.contains("排除范围外监听进程 **\(recordedExcludedCount)** 个"))
+        #expect(readmeEN.contains("Synthetic `[DEMO]` Screenshots Preserved"))
+        #expect(readmeZH.contains("截图仍为静态演示图"))
+    }
 }

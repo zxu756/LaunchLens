@@ -430,33 +430,34 @@ struct ScannerCorrelationTests {
         let psRows = LaunchScanner.parsePSOutput(psRaw)
         let lsofPorts = LaunchScanner.parseLsofPorts(lsofRaw)
 
-        #expect(lctlMap.count == 548)
-        #expect(psRows.count == 618)
+        #expect(lctlMap.count == 543)
+        #expect(psRows.count == 597)
+        #expect(lsofPorts[74202] == [55381])
         #expect(lsofPorts[23500] == [63767])
         #expect(lsofPorts[23501] == [63768])
 
         let scrubbedPlists = [
             PlistMetadata(
-                label: "com.example.agent.11",
-                plistPath: "/tmp/LaunchAgents/com.example.agent.11.plist",
+                label: "com.example.agent.04",
+                plistPath: "/tmp/LaunchAgents/com.example.agent.04.plist",
                 domain: .userAgent,
-                programCommand: "/opt/example/services/com-example-agent-11",
+                programCommand: "/opt/example/services/com-example-agent-04",
                 runAtLoad: true,
                 keepAlive: true
             ),
             PlistMetadata(
-                label: "com.example.agent.13",
-                plistPath: "/tmp/LaunchAgents/com.example.agent.13.plist",
+                label: "com.example.agent.06",
+                plistPath: "/tmp/LaunchAgents/com.example.agent.06.plist",
                 domain: .userAgent,
-                programCommand: "/opt/example/services/com-example-agent-13",
+                programCommand: "/opt/example/services/com-example-agent-06",
                 runAtLoad: true,
                 keepAlive: true
             ),
             PlistMetadata(
-                label: "com.example.agent.15",
-                plistPath: "/tmp/LaunchAgents/com.example.agent.15.plist",
+                label: "com.example.agent.07",
+                plistPath: "/tmp/LaunchAgents/com.example.agent.07.plist",
                 domain: .userAgent,
-                programCommand: "/opt/example/services/com-example-agent-15",
+                programCommand: "/opt/example/services/com-example-agent-07",
                 runAtLoad: true,
                 keepAlive: true
             )
@@ -472,9 +473,11 @@ struct ScannerCorrelationTests {
         )
 
         let orphans = correlated.filter { $0.domain == .orphanDaemon }
-        #expect(Set(orphans.compactMap(\.pid)) == [23500, 23501])
+        #expect(Set(orphans.compactMap(\.pid)) == [74202, 23500, 23501])
+        let liveCapturedPyOrphan = orphans.first(where: { $0.pid == 74202 })
         let pyOrphan = orphans.first(where: { $0.pid == 23500 })
         let nodeOrphan = orphans.first(where: { $0.pid == 23501 })
+        #expect(liveCapturedPyOrphan?.listeningPorts == [55381])
         #expect(pyOrphan?.listeningPorts == [63767])
         #expect(pyOrphan?.label.contains("orphan_http_probe.py") == true)
         #expect(nodeOrphan?.listeningPorts == [63768])
@@ -496,5 +499,358 @@ struct ScannerCorrelationTests {
         let expectedSynRSS: Int64 = (51_200 + 12_800) * 1024
         #expect(synItems.first?.pid == 77001)
         #expect(synItems.first?.rssBytes == expectedSynRSS)
+    }
+
+    @Test("LR3: Repeatable scrubbing script regenerates deterministic sanitized fixtures with exact command, real timestamp, scrubbing rules, and test-added line provenance")
+    func testLR3FixtureScrubbingScriptDeterminismAndHeaderProvenance() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let scriptURL = repoRoot.appendingPathComponent("Scripts/scrub-fixtures.py")
+        let fixturesDir = repoRoot.appendingPathComponent("Tests/Fixtures")
+        let fm = FileManager.default
+
+        try #require(fm.fileExists(atPath: scriptURL.path), "Expected repeatable scrubbing script at Scripts/scrub-fixtures.py")
+
+        // 1. Verify committed real-machine fixtures carry full LR3 provenance headers and exact test-added line numbers
+        for fileName in [
+            "macos-launchctl-list-2026-11-15.txt",
+            "macos-ps-axo-2026-11-15.txt",
+            "macos-lsof-listen-2026-11-15.txt"
+        ] {
+            let text = try String(contentsOf: fixturesDir.appendingPathComponent(fileName), encoding: .utf8)
+            let allLines = text.components(separatedBy: "\n")
+            let header = allLines.prefix(12).joined(separator: "\n")
+            #expect(header.contains("# Capture command:"))
+            #expect(header.contains("# Capture timestamp: 2026-11-15T"))
+            #expect(!header.contains("2026-11-15T04:26:00Z"), "Fixture \(fileName) still has hand-rounded 04:26:00Z timestamp")
+            #expect(header.contains("# Scrubbing rules:"))
+            #expect(header.contains("# Test-added lines:"))
+
+            if fileName == "macos-ps-axo-2026-11-15.txt" {
+                var probeLines: [Int] = []
+                for (zeroIdx, ln) in allLines.enumerated() where !ln.hasPrefix("#") {
+                    if ln.contains("orphan_http_probe.py") || ln.contains("orphan_mcp_probe.js") {
+                        probeLines.append(zeroIdx + 1)
+                    }
+                }
+                #expect(probeLines.count == 2)
+                for lineNo in probeLines {
+                    #expect(header.contains("\(lineNo)"), "ps header must name exact 1-based test-added line \(lineNo)")
+                }
+            } else if fileName == "macos-lsof-listen-2026-11-15.txt" {
+                var probeLines: [Int] = []
+                for (zeroIdx, ln) in allLines.enumerated() where !ln.hasPrefix("#") {
+                    if ln.contains(":63767") || ln.contains(":63768") {
+                        probeLines.append(zeroIdx + 1)
+                    }
+                }
+                #expect(probeLines.count == 2)
+                for lineNo in probeLines {
+                    #expect(header.contains("\(lineNo)"), "lsof header must name exact 1-based test-added line \(lineNo)")
+                }
+            }
+        }
+
+        // 2. Verify Scripts/scrub-fixtures.py deterministically scrubs raw inputs and records exact test-added lines
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensLR3-\(UUID().uuidString)")
+        let rawDir = tempRoot.appendingPathComponent("raw")
+        let outDir1 = tempRoot.appendingPathComponent("out1")
+        let outDir2 = tempRoot.appendingPathComponent("out2")
+        let outDirClean = tempRoot.appendingPathComponent("out_clean")
+        try fm.createDirectory(at: rawDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        try Data("""
+        PID\tStatus\tLabel
+        4120\t0\tapplication.com.secretcorp.chat.991122
+        -\t0\tcom.apple.Finder
+        910\t0\tcom.secretcorp.sync-helper
+        """.utf8).write(to: rawDir.appendingPathComponent("launchctl-list.txt"))
+
+        let fakeHome = "/" + "Users" + "/alice_dev"
+        let fakeSecret = "sk" + "-live-secret999"
+        try Data("""
+          PID  PPID   UID    RSS ARGS
+            1     0     0  12000 /sbin/launchd
+          910     1   501  24000 \(fakeHome)/Library/Application Support/SecretCorp/sync-helper --token=\(fakeSecret)
+         4120     1   501 180000 /Applications/SecretCorpChat.app/Contents/MacOS/SecretCorpChat --user=alice_dev@example.com
+         4200  4120   501  42000 /opt/homebrew/bin/node \(fakeHome)/Projects/secret-agent/worker.js
+        """.utf8).write(to: rawDir.appendingPathComponent("ps-axo.txt"))
+
+        try Data("""
+        COMMAND     PID USER       FD   TYPE             DEVICE SIZE/OFF NODE NAME
+        sync-help   910 alice_dev  11u  IPv4 0xdeadbeefcafebabe      0t0  TCP 127.0.0.1:49100 (LISTEN)
+        SecretCor  4120 alice_dev  19u  IPv4 0xdeadbeefcafebabe      0t0  TCP 127.0.0.1:49200 (LISTEN)
+        """.utf8).write(to: rawDir.appendingPathComponent("lsof-listen.txt"))
+
+        func runScrubber(outDir: URL, injectOrphans: Bool) throws {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            var args = [
+                scriptURL.path,
+                "--raw-dir", rawDir.path,
+                "--out-dir", outDir.path,
+                "--captured-at", "2026-11-15T10:34:27Z"
+            ]
+            if injectOrphans {
+                args.append("--inject-test-orphans")
+            }
+            proc.arguments = args
+            let errPipe = Pipe()
+            proc.standardError = errPipe
+            try proc.run()
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            let errText = String(data: errData, encoding: .utf8) ?? ""
+            #expect(proc.terminationStatus == 0, "Scrubber failed: \(errText)")
+        }
+
+        try runScrubber(outDir: outDir1, injectOrphans: true)
+        try runScrubber(outDir: outDir2, injectOrphans: true)
+        try runScrubber(outDir: outDirClean, injectOrphans: false)
+
+        for fileName in [
+            "macos-launchctl-list-2026-11-15.txt",
+            "macos-ps-axo-2026-11-15.txt",
+            "macos-lsof-listen-2026-11-15.txt"
+        ] {
+            let d1 = try Data(contentsOf: outDir1.appendingPathComponent(fileName))
+            let d2 = try Data(contentsOf: outDir2.appendingPathComponent(fileName))
+            #expect(d1 == d2, "Scrubber must be byte-for-byte deterministic on \(fileName)")
+
+            let s1 = try #require(String(data: d1, encoding: .utf8))
+            let macHomePrefix = "/" + "Users" + "/"
+            #expect(!s1.contains(macHomePrefix))
+            #expect(!s1.contains("alice_dev"))
+            #expect(!s1.contains("secret-agent"))
+            #expect(!s1.lowercased().contains("secretcorp"))
+            #expect(!s1.contains(fakeSecret))
+            #expect(!s1.contains("0xdeadbeefcafebabe"))
+
+            let sClean = try String(contentsOf: outDirClean.appendingPathComponent(fileName), encoding: .utf8)
+            #expect(sClean.contains("# Test-added lines: none"))
+            #expect(!sClean.contains("orphan_mcp_probe.js"))
+        }
+    }
+
+    @Test("LR1 & LR2: Bracketed before/after snapshots tolerate mid-scan child churn within 5%, print uptime on failure, use bottom-up ppid reference, and detail excluded listener reasons")
+    func testLR1AndLR2BracketedSnapshotUptimeOnFailureAndBottomUpReferenceWithExcludedPortReasons() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let refScriptURL = repoRoot.appendingPathComponent("Scripts/acceptance/m1_ledger_ref.py")
+        let ledgerShURL = repoRoot.appendingPathComponent("Scripts/acceptance/m1-ledger.sh")
+        let fm = FileManager.default
+
+        try #require(fm.fileExists(atPath: refScriptURL.path), "Expected standalone reference verifier at Scripts/acceptance/m1_ledger_ref.py")
+
+        let refSource = try String(contentsOf: refScriptURL, encoding: .utf8)
+        let shSource = try String(contentsOf: ledgerShURL, encoding: .utf8)
+
+        // LR2 structural independence: neither m1-ledger.sh nor m1_ledger_ref.py may use top-down children_by_ppid / collect_tree
+        #expect(!refSource.contains("children_by_ppid"))
+        #expect(!refSource.contains("collect_tree"))
+        #expect(!shSource.contains("children_by_ppid"))
+        #expect(!shSource.contains("collect_tree"))
+        #expect(refSource.contains("ancestor_chain"))
+
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensLR12-\(UUID().uuidString)")
+        let userAgentsDir = tempRoot.appendingPathComponent("UserAgents")
+        let globalAgentsDir = tempRoot.appendingPathComponent("GlobalAgents")
+        let systemDaemonsDir = tempRoot.appendingPathComponent("SystemDaemons")
+        let beforeDir = tempRoot.appendingPathComponent("before")
+        let afterDir = tempRoot.appendingPathComponent("after")
+        try fm.createDirectory(at: userAgentsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: globalAgentsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: systemDaemonsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: beforeDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: afterDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        try Data("""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>io.test.svc</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>/opt/example/bin/test-svc</string>
+            </array>
+        </dict>
+        </plist>
+        """.utf8).write(to: userAgentsDir.appendingPathComponent("io.test.svc.plist"))
+
+        let lctlText = """
+        PID\tStatus\tLabel
+        1000\t0\tio.test.svc
+        -\t0\tcom.apple.Finder
+        """
+        try Data(lctlText.utf8).write(to: beforeDir.appendingPathComponent("launchctl-list.txt"))
+        try Data(lctlText.utf8).write(to: afterDir.appendingPathComponent("launchctl-list.txt"))
+
+        // Before snapshot: root 1000 alone = 14,100 KB (14,438,400 B)
+        try Data("""
+          PID  PPID   UID    RSS ARGS
+            1     0     0  15000 /sbin/launchd
+           88     1     0   4000 /Library/PrivilegedHelperTools/com.example.rootd
+          500     1   501   3000 -zsh
+          507     1   501   5000 /usr/libexec/rapportd
+          610     1   501  90000 /Applications/ExampleApp.app/Contents/MacOS/ExampleApp
+          700     1   501   2500 -zsh
+          710   700   501  12000 /opt/homebrew/bin/python3 /tmp/session_worker.py
+         1000     1   501  14100 /opt/example/bin/test-svc
+         2001     1   501  38000 /opt/homebrew/bin/node /tmp/m1_orphan_node_probe.js
+         2002     1   501  10000 /opt/homebrew/bin/python3 /tmp/m1_orphan_py_probe.py
+         2003   500   501  16000 /opt/homebrew/bin/node /tmp/node_modules/.bin/live_parent_worker.js
+         9001  9002   501   1024 /opt/example/bin/cycle-a
+         9002  9001   501   1024 /opt/example/bin/cycle-b
+        """.utf8).write(to: beforeDir.appendingPathComponent("ps-axo.txt"))
+
+        // After snapshot: root 1000 spawned child 1001 + grandchild 1002 -> 14,100 + 200,000 + 266,386 = 480,486 KB (492,017,664 B)
+        try Data("""
+          PID  PPID   UID    RSS ARGS
+            1     0     0  15000 /sbin/launchd
+           88     1     0   4000 /Library/PrivilegedHelperTools/com.example.rootd
+          500     1   501   3000 -zsh
+          507     1   501   5000 /usr/libexec/rapportd
+          610     1   501  90000 /Applications/ExampleApp.app/Contents/MacOS/ExampleApp
+          700     1   501   2500 -zsh
+          710   700   501  12000 /opt/homebrew/bin/python3 /tmp/session_worker.py
+         1000     1   501  14100 /opt/example/bin/test-svc
+         1001  1000   501 200000 /opt/example/bin/test-svc-worker
+         1002  1001   501 266386 /opt/example/bin/test-svc-subworker
+         2001     1   501  38000 /opt/homebrew/bin/node /tmp/m1_orphan_node_probe.js
+         2002     1   501  10000 /opt/homebrew/bin/python3 /tmp/m1_orphan_py_probe.py
+         2003   500   501  16000 /opt/homebrew/bin/node /tmp/node_modules/.bin/live_parent_worker.js
+         9001  9002   501   1024 /opt/example/bin/cycle-a
+         9002  9001   501   1024 /opt/example/bin/cycle-b
+        """.utf8).write(to: afterDir.appendingPathComponent("ps-axo.txt"))
+
+        let lsofBefore = """
+        COMMAND     PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+        rootd        88 root   5u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:8088 (LISTEN)
+        rapportd    507 dev    4u   IPv4 0x1000000000000000      0t0  TCP *:49152 (LISTEN)
+        ExampleAp   610 dev    9u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:7679 (LISTEN)
+        python3     710 dev    6u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:55270 (LISTEN)
+        test-svc   1000 dev    8u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:18080 (LISTEN)
+        node       2001 dev   10u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:19001 (LISTEN)
+        python3    2002 dev   11u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:19002 (LISTEN)
+        node       2003 dev   12u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:19003 (LISTEN)
+        """
+        let lsofAfter = """
+        COMMAND     PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+        rootd        88 root   5u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:8088 (LISTEN)
+        rapportd    507 dev    4u   IPv4 0x1000000000000000      0t0  TCP *:49152 (LISTEN)
+        ExampleAp   610 dev    9u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:7679 (LISTEN)
+        python3     710 dev    6u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:55270 (LISTEN)
+        test-svc   1001 dev    8u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:18080 (LISTEN)
+        node       2001 dev   10u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:19001 (LISTEN)
+        python3    2002 dev   11u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:19002 (LISTEN)
+        node       2003 dev   12u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:19003 (LISTEN)
+        """
+        try Data(lsofBefore.utf8).write(to: beforeDir.appendingPathComponent("lsof-listen.txt"))
+        try Data(lsofAfter.utf8).write(to: afterDir.appendingPathComponent("lsof-listen.txt"))
+
+        func writeCLIJSON(to url: URL, serviceRSSBytes: Int64) throws {
+            let orphanRSS: Int64 = (38_000 + 10_000) * 1024
+            let json = """
+            {
+              "orphanRSSBytes": \(orphanRSS),
+              "totalBackgroundRSSBytes": \(serviceRSSBytes + orphanRSS),
+              "services": [
+                {
+                  "domain": "User LaunchAgent",
+                  "isAppleSystem": false,
+                  "label": "io.test.svc",
+                  "listeningPorts": [18080],
+                  "pid": 1000,
+                  "rssBytes": \(serviceRSSBytes)
+                }
+              ],
+              "orphans": [
+                {
+                  "domain": "Orphaned Process",
+                  "isAppleSystem": false,
+                  "label": "node (m1_orphan_node_probe.js)",
+                  "listeningPorts": [19001],
+                  "pid": 2001,
+                  "rssBytes": \(38_000 * 1024)
+                },
+                {
+                  "domain": "Orphaned Process",
+                  "isAppleSystem": false,
+                  "label": "python3 (m1_orphan_py_probe.py)",
+                  "listeningPorts": [19002],
+                  "pid": 2002,
+                  "rssBytes": \(10_000 * 1024)
+                }
+              ]
+            }
+            """
+            try Data(json.utf8).write(to: url)
+        }
+
+        func runRefVerifier(cliJSONURL: URL) throws -> (exitCode: Int32, stdout: String, stderr: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            proc.arguments = [
+                refScriptURL.path,
+                "--before-dir", beforeDir.path,
+                "--after-dir", afterDir.path,
+                "--cli-json", cliJSONURL.path,
+                "--user-agents-dir", userAgentsDir.path,
+                "--global-agents-dir", globalAgentsDir.path,
+                "--system-daemons-dir", systemDaemonsDir.path,
+                "--current-uid", "501",
+                "--node-pid", "2001", "--node-port", "19001",
+                "--py-pid", "2002", "--py-port", "19002",
+                "--live-child-pid", "2003", "--live-child-ppid", "500", "--live-child-port", "19003"
+            ]
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError = errPipe
+            try proc.run()
+            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            return (
+                proc.terminationStatus,
+                String(data: outData, encoding: .utf8) ?? "",
+                String(data: errData, encoding: .utf8) ?? ""
+            )
+        }
+
+        // Case A: Mid-scan child tree spawn (14.44 MB before -> 492.02 MB in CLI & after) passes with 0.0000% bracket diff
+        let validCLIURL = tempRoot.appendingPathComponent("cli-valid.json")
+        try writeCLIJSON(to: validCLIURL, serviceRSSBytes: 480_486 * 1024)
+        let passRun = try runRefVerifier(cliJSONURL: validCLIURL)
+        #expect(passRun.exitCode == 0, "Expected bracketed mid-scan shift to pass, got stderr: \(passRun.stderr)")
+        #expect(passRun.stdout.contains("[M1 Row 1 PASS]"))
+        #expect(passRun.stdout.contains("max_rss_diff=0.0000%"))
+        #expect(passRun.stdout.contains("[M1 Row 2 PASS]"))
+        #expect(passRun.stdout.contains("host_lsof_listener_pids=8"))
+        #expect(passRun.stdout.contains("tracked_listener_pids=3"))
+        #expect(passRun.stdout.contains("excluded_listener_pids=5"))
+        #expect(passRun.stdout.contains("apple_system=1"))
+        #expect(passRun.stdout.contains("gui_app_bundle=1"))
+        #expect(passRun.stdout.contains("live_session_child=1"))
+        #expect(passRun.stdout.contains("injected_live_parent_control=1"))
+        #expect(passRun.stdout.contains("other_uid=1"))
+        #expect(passRun.stdout.contains("unaccounted_listeners=0"))
+        #expect(passRun.stdout.contains("[M1 Row 3 PASS]"))
+
+        // Case B: Out-of-bracket >5% deviation (600,000 KB vs max 480,486 KB = +24.87%) MUST fail AND print host uptime
+        let badCLIURL = tempRoot.appendingPathComponent("cli-bad.json")
+        try writeCLIJSON(to: badCLIURL, serviceRSSBytes: 600_000 * 1024)
+        let failRun = try runRefVerifier(cliJSONURL: badCLIURL)
+        #expect(failRun.exitCode != 0)
+        #expect(failRun.stderr.contains("exceeded 5%"))
+        #expect(failRun.stderr.lowercased().contains("load averages:"), "Failure diagnostic must print uptime load averages, got: \(failRun.stderr)")
     }
 }

@@ -64,7 +64,7 @@ echo "==> [Real launchd 1/4] Bootstrapping temporary service $LABEL..."
 /bin/launchctl print "gui/$UID_NUM/$LABEL" >/dev/null
 
 echo "==> [Real launchd 2/4] Freezing $LABEL via LaunchLens CLI..."
-"$BIN_PATH" --cli freeze "$LABEL" --ledger-dir "$TMP_VAULT" --lang en
+"$BIN_PATH" --cli freeze "$LABEL" --confirm --ledger-dir "$TMP_VAULT" --lang en
 set +e
 /bin/launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1
 PRINT_AFTER_FREEZE=$?
@@ -79,7 +79,7 @@ if [[ -e "$PLIST_PATH" ]]; then
 fi
 
 echo "==> [Real launchd 3/4] Restoring $LABEL via LaunchLens CLI..."
-"$BIN_PATH" --cli restore "$LABEL" --ledger-dir "$TMP_VAULT" --lang en
+"$BIN_PATH" --cli restore "$LABEL" --confirm --ledger-dir "$TMP_VAULT" --lang en
 /bin/launchctl print "gui/$UID_NUM/$LABEL" >/dev/null
 if ! cmp -s "$PLIST_PATH" "$REF_PLIST"; then
     echo "FAIL: Restored plist is not byte-identical to original!" >&2
@@ -158,7 +158,7 @@ for CRASH_STEP in afterBootout afterRemoveOriginalPlist; do
         echo "FAIL: CrashProbe unexpectedly exited 0 for step $CRASH_STEP" >&2
         exit 1
     fi
-    "$BIN_PATH" --cli repair --ledger-dir "$TMP_VAULT" --lang en
+    "$BIN_PATH" --cli repair --confirm --ledger-dir "$TMP_VAULT" --lang en
     "$BIN_PATH" --cli audit --ledger-dir "$TMP_VAULT" --lang en
     /bin/launchctl print "gui/$UID_NUM/$LABEL" >/dev/null
     if ! cmp -s "$PLIST_PATH" "$REF_PLIST"; then

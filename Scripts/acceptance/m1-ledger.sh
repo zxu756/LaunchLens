@@ -35,9 +35,14 @@ kill_spawned_probes() {
 }
 
 cleanup() {
+    local exit_code=$?
+    if [[ "$exit_code" -ne 0 ]]; then
+        echo "[Diagnostic] m1-ledger.sh failed (exit=$exit_code); host uptime: $(/usr/bin/uptime 2>&1 || true)" >&2
+    fi
     kill_spawned_probes
     chmod -R u+rwx "$TMP_ROOT" 2>/dev/null || true
     rm -rf "$TMP_ROOT"
+    exit "$exit_code"
 }
 trap cleanup EXIT INT TERM
 
@@ -134,12 +139,11 @@ PYEOF
     echo ""
     echo "--- [Live Ledger Cross-Check: launchctl + ps + lsof + Orphan Injection] ---"
 
-    python3 - "$BIN_PATH" "$NODE_BIN" "$TMP_ROOT" "$SPAWNED_PIDS_FILE" <<'PYEOF'
+    python3 - "$BIN_PATH" "$NODE_BIN" "$TMP_ROOT" "$SPAWNED_PIDS_FILE" "$ROOT/Scripts/acceptance/m1_ledger_ref.py" <<'PYEOF'
 from __future__ import annotations
 import json
 import os
 import pathlib
-import plistlib
 import pwd
 import signal
 import subprocess
@@ -150,6 +154,7 @@ bin_path = sys.argv[1]
 node_bin = sys.argv[2]
 tmp_root = pathlib.Path(sys.argv[3])
 spawned_pids_file = pathlib.Path(sys.argv[4])
+ref_verifier_py = sys.argv[5]
 
 def record_pid(pid: int) -> None:
     with spawned_pids_file.open("a", encoding="utf-8") as f:
@@ -274,26 +279,40 @@ while time.time() < reparent_deadline:
         break
     time.sleep(0.05)
 
-# 2. Capture live system truth and LaunchLens --cli list --json back-to-back
+# 2. Capture bracketed before/after system truth around `LaunchLens --cli list --json` (LR1):
+#    ps_before runs immediately before LaunchLens, and ps_after runs immediately after LaunchLens,
+#    eliminating false 5% drift when another service spawns or reaps children during slow lsof scans.
 empty_vault = tmp_root / "empty_vault"
-lctl_out = subprocess.check_output(["/bin/launchctl", "list"], text=True)
-ps_out = subprocess.check_output(["/bin/ps", "-axo", "pid,ppid,uid,rss,args"], text=True)
-lsof_out = subprocess.check_output(["/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], text=True)
-cli_raw = subprocess.check_output(
-    [bin_path, "--cli", "list", "--json", "--ledger-dir", str(empty_vault), "--lang", "en"],
-    text=True,
-)
+before_dir = tmp_root / "snap_before"
+after_dir = tmp_root / "snap_after"
+before_dir.mkdir(parents=True, exist_ok=True)
+after_dir.mkdir(parents=True, exist_ok=True)
+cli_json_path = tmp_root / "cli_list.json"
 
-# 3. Tear down all spawned test processes immediately after capture
-for pid in (live_child_pid, parent_holder.pid, node_pid, py_pid):
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
 try:
-    parent_holder.wait(timeout=2.0)
-except Exception:
-    pass
+    lctl_before = subprocess.check_output(["/bin/launchctl", "list"], text=True)
+    lsof_before = subprocess.check_output(["/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], text=True)
+    ps_before = subprocess.check_output(["/bin/ps", "-axo", "pid,ppid,uid,rss,args"], text=True)
+
+    cli_raw = subprocess.check_output(
+        [bin_path, "--cli", "list", "--json", "--ledger-dir", str(empty_vault), "--lang", "en"],
+        text=True,
+    )
+
+    ps_after = subprocess.check_output(["/bin/ps", "-axo", "pid,ppid,uid,rss,args"], text=True)
+    lctl_after = subprocess.check_output(["/bin/launchctl", "list"], text=True)
+    lsof_after = subprocess.check_output(["/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], text=True)
+finally:
+    # 3. Always tear down all spawned test processes immediately after capture
+    for pid in (live_child_pid, parent_holder.pid, node_pid, py_pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        parent_holder.wait(timeout=2.0)
+    except Exception:
+        pass
 
 # Verify zero residual probe processes
 time.sleep(0.1)
@@ -302,310 +321,36 @@ for pid in (node_pid, py_pid, live_child_pid, parent_holder.pid):
     if rc == 0:
         raise RuntimeError(f"Residual spawned test process still alive: PID {pid}")
 
-# 4. Independent reference calculation
-payload = json.loads(cli_raw)
-cli_services = payload["services"]
-cli_orphans = payload["orphans"]
+(before_dir / "launchctl-list.txt").write_text(lctl_before, encoding="utf-8")
+(before_dir / "ps-axo.txt").write_text(ps_before, encoding="utf-8")
+(before_dir / "lsof-listen.txt").write_text(lsof_before, encoding="utf-8")
 
-pw_dir = pwd.getpwuid(os.getuid()).pw_dir
-plist_dirs = [
-    ("User LaunchAgent", os.path.join(pw_dir, "Library/LaunchAgents")),
-    ("Global LaunchAgent", "/Library/LaunchAgents"),
-    ("System LaunchDaemon", "/Library/LaunchDaemons"),
-]
+(after_dir / "launchctl-list.txt").write_text(lctl_after, encoding="utf-8")
+(after_dir / "ps-axo.txt").write_text(ps_after, encoding="utf-8")
+(after_dir / "lsof-listen.txt").write_text(lsof_after, encoding="utf-8")
 
-ref_plists = []
-domain_counts = {"User LaunchAgent": 0, "Global LaunchAgent": 0, "System LaunchDaemon": 0}
-for dom, dpath in plist_dirs:
-    if not os.path.isdir(dpath):
-        continue
-    for fn in sorted(os.listdir(dpath)):
-        if fn.startswith(".") or not fn.endswith(".plist"):
-            continue
-        fp = os.path.join(dpath, fn)
-        try:
-            with open(fp, "rb") as f:
-                obj = plistlib.load(f)
-            if not isinstance(obj, dict):
-                continue
-        except Exception:
-            continue
-        label = obj.get("Label") if isinstance(obj.get("Label"), str) else fn[:-6]
-        prog = obj.get("Program").strip() if isinstance(obj.get("Program"), str) else ""
-        raw_args = [a for a in (obj.get("ProgramArguments") or []) if isinstance(a, str) and a]
-        if prog:
-            resolved_args = [prog] + raw_args[1:] if raw_args else [prog]
-        elif raw_args:
-            resolved_args = raw_args
-        else:
-            resolved_args = None
-        ref_plists.append((dom, label, resolved_args))
-        domain_counts[dom] += 1
+cli_json_path.write_text(cli_raw, encoding="utf-8")
 
-lctl_map: dict[str, int | None] = {}
-for line in lctl_out.splitlines()[1:]:
-    cols = line.split()
-    if len(cols) >= 3:
-        pid_val = int(cols[0]) if cols[0] != "-" and cols[0].isdigit() else None
-        lbl = " ".join(cols[2:])
-        lctl_map[lbl] = pid_val
-
-ps_rows: dict[int, tuple[int, int, int, str]] = {}
-children_by_ppid: dict[int, list[int]] = {}
-for line in ps_out.splitlines()[1:]:
-    s = line.strip()
-    if not s:
-        continue
-    cols = s.split(None, 4)
-    if len(cols) < 5 or not cols[0].isdigit():
-        continue
-    pid, ppid, uid, rss_kb = int(cols[0]), int(cols[1]), int(cols[2]), int(cols[3])
-    cmd = cols[4]
-    ps_rows[pid] = (ppid, uid, rss_kb, cmd)
-    children_by_ppid.setdefault(ppid, []).append(pid)
-
-lsof_ports_by_pid: dict[int, set[int]] = {}
-for line in lsof_out.splitlines()[1:]:
-    cols = line.split()
-    if len(cols) >= 8 and cols[1].isdigit():
-        pid = int(cols[1])
-        endpoint = cols[-2] if (cols[-1] == "(LISTEN)" and len(cols) >= 9) else cols[-1]
-        if ":" in endpoint:
-            port_str = endpoint.rsplit(":", 1)[1]
-            if port_str.isdigit():
-                lsof_ports_by_pid.setdefault(pid, set()).add(int(port_str))
-
-def collect_tree(roots: set[int]) -> set[int]:
-    visited: set[int] = set()
-    stack = [r for r in sorted(roots) if r > 0]
-    while stack:
-        cur = stack.pop()
-        if cur in visited:
-            continue
-        visited.add(cur)
-        for ch in children_by_ppid.get(cur, []):
-            if ch > 0 and ch not in visited:
-                stack.append(ch)
-    return visited
-
-def norm_exe(path_token: str) -> str:
-    if path_token.startswith("~/"):
-        path_token = os.path.expanduser(path_token)
-    if path_token.startswith("/"):
-        return os.path.normpath(path_token)
-    return path_token
-
-claimed_lctl_roots = {p for p in lctl_map.values() if p and p > 0}
-claimed_all_pids = collect_tree(claimed_lctl_roots)
-
-ref_services: dict[tuple[str, str], tuple[bool, int, list[int], set[int]]] = {}
-for dom, lbl, rargs in ref_plists:
-    lctl_pid = lctl_map.get(lbl)
-    if lctl_pid and lctl_pid > 0:
-        roots = {lctl_pid}
-    elif rargs:
-        target_exe = norm_exe(rargs[0])
-        roots = set()
-        for rpid, (_rppid, _ruid, _rrss, rcmd) in ps_rows.items():
-            if rpid in claimed_all_pids:
-                continue
-            first_tok = norm_exe(rcmd.split()[0]) if rcmd.split() else ""
-            if first_tok == target_exe:
-                roots.add(rpid)
-        if roots:
-            claimed_all_pids |= collect_tree(roots)
-    else:
-        roots = set()
-
-    tree_pids = collect_tree(roots)
-    rss_bytes = sum(max(0, ps_rows[p][2]) for p in tree_pids if p in ps_rows) * 1024
-    ports = sorted({pt for p in tree_pids for pt in lsof_ports_by_pid.get(p, set())})
-    ref_services[(dom, lbl)] = (bool(roots), rss_bytes, ports, tree_pids)
-
-# --- ROW 1 ASSERTIONS: Service count 100% + RSS <= 5% ---
-cli_keys = [(s["domain"], s["label"]) for s in cli_services]
-ref_keys = [(dom, lbl) for dom, lbl, _ in ref_plists]
-if len(cli_services) != len(ref_plists) or sorted(cli_keys) != sorted(ref_keys):
-    raise AssertionError(
-        f"Service count/set mismatch: cli={len(cli_services)} vs ref={len(ref_plists)}"
-    )
-
-running_service_count = 0
-multi_proc_tree_count = 0
-max_rss_pct_diff = 0.0
-max_rss_kb_diff = 0.0
-
-for svc in cli_services:
-    key = (svc["domain"], svc["label"])
-    ref_running, ref_rss, _ref_ports, tree_pids = ref_services[key]
-    cli_rss = int(svc["rssBytes"])
-    cli_pid = svc.get("pid")
-    if (cli_pid is not None and cli_pid > 0) or ref_running:
-        running_service_count += 1
-        if len(tree_pids) > 1:
-            multi_proc_tree_count += 1
-        abs_diff = abs(cli_rss - ref_rss)
-        pct_diff = (abs_diff * 100.0) / max(ref_rss, 1)
-        kb_diff = abs_diff / 1024.0
-        max_rss_pct_diff = max(max_rss_pct_diff, pct_diff)
-        max_rss_kb_diff = max(max_rss_kb_diff, kb_diff)
-        # Allow <= 5.0% (or <= 64 KB if tiny <1 MB process shifts 1-4 pages between back-to-back ps invocations)
-        if pct_diff > 5.0 and not (ref_rss < 1_048_576 and abs_diff <= 65_536):
-            raise AssertionError(
-                f"Running service RSS diff exceeded 5%: domain={svc['domain']} "
-                f"cli_rss={cli_rss} ref_rss={ref_rss} diff_pct={pct_diff:.3f}%"
-            )
-    else:
-        if cli_rss != 0 or ref_rss != 0:
-            raise AssertionError(
-                f"Idle service had non-zero RSS: domain={svc['domain']} cli_rss={cli_rss} ref_rss={ref_rss}"
-            )
-
-services_rss_mb = sum(int(s["rssBytes"]) for s in cli_services if not s.get("isAppleSystem", False)) / (1024.0 * 1024.0)
-orphan_rss_mb = payload["orphanRSSBytes"] / (1024.0 * 1024.0)
-total_bg_mb = payload["totalBackgroundRSSBytes"] / (1024.0 * 1024.0)
-print(
-    f"[M1 Row 1 PASS] Services matched 100%: total={len(cli_services)} "
-    f"(user={domain_counts['User LaunchAgent']}, global={domain_counts['Global LaunchAgent']}, "
-    f"system={domain_counts['System LaunchDaemon']}), running={running_service_count} "
-    f"(multi_pid_trees={multi_proc_tree_count}), services_rss={services_rss_mb:.2f} MB, "
-    f"injected_orphan_rss={orphan_rss_mb:.2f} MB, total_non_apple_rss={total_bg_mb:.2f} MB, "
-    f"max_rss_diff={max_rss_pct_diff:.4f}% ({max_rss_kb_diff:.1f} KB, threshold <= 5.0%)."
-)
-
-# --- ROW 2 ASSERTIONS: Listening TCP ports match lsof 100% ---
-for svc in cli_services:
-    key = (svc["domain"], svc["label"])
-    _ref_running, _ref_rss, ref_ports, _tree_pids = ref_services[key]
-    cli_ports = sorted(svc.get("listeningPorts", []))
-    if cli_ports != ref_ports:
-        raise AssertionError(
-            f"Service port mismatch in {svc['domain']}: cli={cli_ports} vs lsof={ref_ports}"
-        )
-
-for orph in cli_orphans:
-    opid = orph.get("pid")
-    cli_oports = sorted(orph.get("listeningPorts", []))
-    ref_oports = sorted(lsof_ports_by_pid.get(opid, set())) if opid else []
-    if cli_oports != ref_oports:
-        raise AssertionError(
-            f"Orphan PID {opid} port mismatch: cli={cli_oports} vs lsof={ref_oports}"
-        )
-
-cli_all_ports = sorted(
-    {pt for item in (cli_services + cli_orphans) for pt in item.get("listeningPorts", [])}
-)
-tracked_pids = {
-    p for (_r, _rss, _pts, tpids) in ref_services.values() for p in tpids
-} | {orph["pid"] for orph in cli_orphans if orph.get("pid")}
-ref_tracked_ports = sorted(
-    {pt for pid in tracked_pids for pt in lsof_ports_by_pid.get(pid, set())}
-)
-if cli_all_ports != ref_tracked_ports:
-    raise AssertionError(
-        f"Aggregate listening port set mismatch: cli={cli_all_ports} vs lsof={ref_tracked_ports}"
-    )
-
-def root_ancestor_pid(pid: int) -> int:
-    seen: set[int] = set()
-    cur = pid
-    while cur in ps_rows and cur not in seen:
-        seen.add(cur)
-        ppid = ps_rows[cur][0]
-        if ppid <= 1 or ppid not in ps_rows:
-            return cur
-        cur = ppid
-    return pid
-
-def is_apple_or_genuine_gui_app(cmd: str) -> bool:
-    low = cmd.lower()
-    if low.startswith(("/system/", "/usr/libexec/", "/usr/sbin/", "/sbin/")):
-        return True
-    if ".xpc/contents/" in low or ".appex/contents/" in low:
-        return True
-    cleaned = low.replace("/xcode.app/contents/developer/", "/_xcode_cli_developer_/")
-    if ".app/contents/" in cleaned and not any(
-        interp in cleaned for interp in ("python.app/contents/", "python3.app/contents/", "ruby.app/contents/")
-    ):
-        return True
-    return False
-
-unaccounted_lsof_pids = []
-gui_or_apple_lsof_pids = 0
-for lpid in sorted(lsof_ports_by_pid.keys()):
-    if lpid in tracked_pids or lpid == live_child_pid:
-        continue
-    if lpid not in ps_rows:
-        continue
-    _ppid, luid, _rss, lcmd = ps_rows[lpid]
-    anc = root_ancestor_pid(lpid)
-    anc_cmd = ps_rows[anc][3] if anc in ps_rows else lcmd
-    if luid != os.getuid() or is_apple_or_genuine_gui_app(lcmd) or is_apple_or_genuine_gui_app(anc_cmd) or lpid in claimed_all_pids:
-        gui_or_apple_lsof_pids += 1
-    else:
-        unaccounted_lsof_pids.append(lpid)
-
-if unaccounted_lsof_pids:
-    raise AssertionError(f"Unaccounted host lsof listener PIDs outside LaunchLens: {unaccounted_lsof_pids}")
-
-print(
-    f"[M1 Row 2 PASS] Listening TCP port set matched lsof 100%: "
-    f"tracked_unique_ports={len(cli_all_ports)} (ref_lsof_ports={len(ref_tracked_ports)}), "
-    f"excluded_gui_or_system_listener_pids={gui_or_apple_lsof_pids}, unaccounted_listeners=0."
-)
-
-# --- ROW 3 ASSERTIONS: Orphan precision (2/2 detected, 0 false positives) ---
-orphans_by_pid = {o["pid"]: o for o in cli_orphans if o.get("pid") is not None}
-
-if node_pid not in orphans_by_pid:
-    raise AssertionError(f"Detached node orphan PID {node_pid} (port {node_port}) was NOT detected!")
-if orphans_by_pid[node_pid].get("listeningPorts") != [node_port]:
-    raise AssertionError(
-        f"Detached node orphan port mismatch: got {orphans_by_pid[node_pid].get('listeningPorts')}, expected [{node_port}]"
-    )
-
-if py_pid not in orphans_by_pid:
-    raise AssertionError(f"Detached python3 orphan PID {py_pid} (port {py_port}) was NOT detected!")
-if orphans_by_pid[py_pid].get("listeningPorts") != [py_port]:
-    raise AssertionError(
-        f"Detached python3 orphan port mismatch: got {orphans_by_pid[py_pid].get('listeningPorts')}, expected [{py_port}]"
-    )
-
-if live_child_pid in orphans_by_pid:
-    raise AssertionError(
-        f"False positive: live-parent node_modules worker PID {live_child_pid} (ppid={live_child_ppid}) was wrongly flagged as orphan!"
-    )
-
-my_uid = os.getuid()
-gui_app_false_positives = 0
-foreign_uid_false_positives = 0
-live_parent_false_positives = 0
-
-for opid, _oitem in orphans_by_pid.items():
-    if opid not in ps_rows:
-        continue
-    oppid, ouid, _orss, ocmd = ps_rows[opid]
-    if ouid != my_uid:
-        foreign_uid_false_positives += 1
-    if oppid != 1:
-        live_parent_false_positives += 1
-    if is_apple_or_genuine_gui_app(ocmd):
-        gui_app_false_positives += 1
-
-if gui_app_false_positives or foreign_uid_false_positives or live_parent_false_positives:
-    raise AssertionError(
-        f"Orphan false positives detected: gui_app={gui_app_false_positives}, "
-        f"foreign_uid={foreign_uid_false_positives}, ppid_ne_1={live_parent_false_positives}"
-    )
-
-host_gui_app_proc_count = sum(1 for (_pp, _u, _r, c) in ps_rows.values() if ".app/contents/" in c.lower())
-preexisting_orphans = len(orphans_by_pid) - 2
-
-print(
-    f"[M1 Row 3 PASS] Orphan detection verified: spawned_orphans_detected=2/2 "
-    f"(node port={node_port}, python3 port={py_port}), preexisting_host_orphans={preexisting_orphans}, "
-    f"live_parent_node_modules_false_positives=0 (ppid={live_child_ppid}, port={live_child_port}), "
-    f"gui_app_false_positives=0 (across {host_gui_app_proc_count} live .app processes), foreign_uid_false_positives=0."
+# 4. Run independent bottom-up reference verifier (LR1 & LR2)
+user_agents_dir = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, "Library/LaunchAgents")
+subprocess.run(
+    [
+        sys.executable,
+        ref_verifier_py,
+        "--before-dir", str(before_dir),
+        "--after-dir", str(after_dir),
+        "--cli-json", str(cli_json_path),
+        "--user-agents-dir", user_agents_dir,
+        "--current-uid", str(os.getuid()),
+        "--node-pid", str(node_pid),
+        "--node-port", str(node_port),
+        "--py-pid", str(py_pid),
+        "--py-port", str(py_port),
+        "--live-child-pid", str(live_child_pid),
+        "--live-child-ppid", str(live_child_ppid),
+        "--live-child-port", str(live_child_port),
+    ],
+    check=True,
 )
 PYEOF
 

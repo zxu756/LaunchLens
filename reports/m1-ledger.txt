@@ -6,9 +6,9 @@ Date: 2026-11-15
 [Setup] Building LaunchLens CLI binary (headless, zero GUI)...
 
 --- [Live Ledger Cross-Check: launchctl + ps + lsof + Orphan Injection] ---
-[M1 Row 1 PASS] Services matched 100%: total=15 (user=9, global=3, system=3), running=4 (multi_pid_trees=1), services_rss=77.02 MB, injected_orphan_rss=47.14 MB, total_non_apple_rss=124.16 MB, max_rss_diff=0.0000% (0.0 KB, threshold <= 5.0%).
-[M1 Row 2 PASS] Listening TCP port set matched lsof 100%: tracked_unique_ports=4 (ref_lsof_ports=4), excluded_gui_or_system_listener_pids=11, unaccounted_listeners=0.
-[M1 Row 3 PASS] Orphan detection verified: spawned_orphans_detected=2/2 (node port=49865, python3 port=49863), preexisting_host_orphans=0, live_parent_node_modules_false_positives=0 (ppid=54877, port=49864), gui_app_false_positives=0 (across 132 live .app processes), foreign_uid_false_positives=0.
+[M1 Row 1 PASS] Services matched 100%: total=15 (user=9, global=3, system=3), running=4 (multi_pid_trees=1), services_rss=81.45 MB, injected_orphan_rss=49.41 MB, total_non_apple_rss=130.86 MB, max_rss_diff=0.0000% (0.0 KB, threshold <= 5.0%).
+[M1 Row 2 PASS] Listening TCP port set matched lsof 100%: host_lsof_listener_pids=24 (host_lsof_unique_ports=36), tracked_listener_pids=5 (tracked_unique_ports=5, ref_lsof_ports=5), excluded_listener_pids=19 (reasons: apple_system=3, gui_app_bundle=2, live_session_child=13, injected_live_parent_control=1, other_uid=0), unaccounted_listeners=0.
+[M1 Row 3 PASS] Orphan detection verified: spawned_orphans_detected=2/2 (node port=59135, python3 port=59134), preexisting_host_orphans=1, live_parent_node_modules_false_positives=0 (ppid=85091, port=59136), gui_app_false_positives=0 (across 87 live .app processes), foreign_uid_false_positives=0.
 
 --- [Row 4: Opt-In Real launchd Freeze/Restore & Mid-Freeze Kill Check] ---
 [M1 Row 4 SKIPPED] Real launchd freeze/restore + mid-freeze SIGKILL recovery (LAUNCHLENS_REAL_LAUNCHD!=1): 没跑

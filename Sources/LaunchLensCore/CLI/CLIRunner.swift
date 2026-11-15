@@ -99,6 +99,7 @@ public enum CLIRunner {
         var showHelp = false
         var sawCLIFlag = false
         var jsonOutput = false
+        var confirmed = false
         var unknownFlags: [String] = []
 
         while idx < argsWithoutExe.count {
@@ -108,6 +109,8 @@ public enum CLIRunner {
                 sawCLIFlag = true
             case "--json":
                 jsonOutput = true
+            case "--confirm":
+                confirmed = true
             case "--help", "-h":
                 showHelp = true
             case "--lang":
@@ -237,6 +240,15 @@ public enum CLIRunner {
             return CLIExecutionOutput(exitCode: 2, stderr: msg)
         }
 
+        let isWriteSubcommand = (subcmd == "freeze" || subcmd == "restore" || subcmd == "repair")
+        if confirmed && !isWriteSubcommand {
+            let msg = localizer.L(
+                "Error: '--confirm' is only valid with write subcommands (freeze, restore, repair).\n\(usageText(localizer))\n",
+                "错误：参数「--confirm」仅适用于写操作子命令（freeze、restore、repair）。\n\(usageText(localizer))\n"
+            )
+            return CLIExecutionOutput(exitCode: 2, stderr: msg)
+        }
+
         let fm = FileManager.default
         let vaultURL = ledgerDirPath.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
         let agentsURL = agentsDirPath.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath) }
@@ -273,6 +285,16 @@ public enum CLIRunner {
         case "freeze":
             let targetLabel = subcommands[1]
             let item = resolveUserAgentItemForFreeze(targetLabel: targetLabel, agentsDirectory: store.userLaunchAgentsDirectory)
+            if !confirmed {
+                let plistPath = item.plistPath ?? "<missing plist>"
+                let cmd = store.bootoutCommandPreview(plistPath: plistPath)
+                let snapDir = store.snapshotsDirectory.path
+                let prompt = localizer.L(
+                    "Confirmation required to freeze LaunchAgent '\(targetLabel)'.\n  Command to run: \(cmd)\n  Active plist: \(plistPath)\n  Snapshot vault: \(snapDir)\nRe-run with '--confirm' to execute this change.\n",
+                    "冻结 LaunchAgent「\(targetLabel)」需要显式确认。\n  将执行的命令：\(cmd)\n  当前配置文件：\(plistPath)\n  快照保险库目录：\(snapDir)\n请加上 --confirm 参数重新运行以确认执行。\n"
+                )
+                return CLIExecutionOutput(exitCode: 2, stderr: prompt)
+            }
             do {
                 let rec = try store.freeze(item: item)
                 if jsonOutput {
@@ -291,6 +313,17 @@ public enum CLIRunner {
 
         case "restore":
             let targetID = subcommands[1]
+            if !confirmed {
+                let matching = store.loadFrozenRecords().first { $0.id == targetID || $0.label == targetID }
+                let dstPath = matching?.originalPlistPath ?? store.userLaunchAgentsDirectory.appendingPathComponent("\(targetID).plist").path
+                let srcDesc = matching.map { "\($0.snapshotFilePath) (sha256:\($0.sha256Hex.prefix(12)))" } ?? store.snapshotsDirectory.path
+                let cmd = store.bootstrapCommandPreview(plistPath: dstPath)
+                let prompt = localizer.L(
+                    "Confirmation required to restore LaunchAgent '\(targetID)'.\n  Command to run: \(cmd)\n  Verified backup: \(srcDesc)\n  Restore destination: \(dstPath)\nRe-run with '--confirm' to execute this change.\n",
+                    "恢复 LaunchAgent「\(targetID)」需要显式确认。\n  将执行的命令：\(cmd)\n  已校验备份文件：\(srcDesc)\n  恢复目标路径：\(dstPath)\n请加上 --confirm 参数重新运行以确认执行。\n"
+                )
+                return CLIExecutionOutput(exitCode: 2, stderr: prompt)
+            }
             do {
                 try store.restore(recordID: targetID)
                 if jsonOutput {
@@ -308,6 +341,24 @@ public enum CLIRunner {
             }
 
         case "repair":
+            if !confirmed {
+                let report = store.auditInterruptedTransactionsAndOrphanBackups()
+                let cmdNote: String
+                if !report.inProgressRecords.isEmpty {
+                    let labels = report.inProgressRecords.map(\.label).joined(separator: ", ")
+                    cmdNote = "/bin/launchctl print gui/\(store.uid)/<label> && /bin/launchctl bootstrap gui/\(store.uid) \"<interrupted-plist>\" (\(labels))"
+                } else {
+                    cmdNote = localizer.L(
+                        "Adopt \(report.orphanedBackupPaths.count) orphaned backup plist(s) into \(store.ledgerFileURL.path)",
+                        "将 \(report.orphanedBackupPaths.count) 个孤儿备份 plist 纳入 \(store.ledgerFileURL.path)"
+                    )
+                }
+                let prompt = localizer.L(
+                    "Confirmation required to repair ledger integrity.\n  Action / command: \(cmdNote)\n  Snapshots directory: \(store.snapshotsDirectory.path)\n  Ledger file: \(store.ledgerFileURL.path)\nRe-run with '--confirm' to execute this change.\n",
+                    "修复台账完整性与孤儿备份需要显式确认。\n  将执行的操作 / 命令：\(cmdNote)\n  快照备份目录：\(store.snapshotsDirectory.path)\n  台账文件：\(store.ledgerFileURL.path)\n请加上 --confirm 参数重新运行以确认执行。\n"
+                )
+                return CLIExecutionOutput(exitCode: 2, stderr: prompt)
+            }
             do {
                 let summary = try store.recoverInterruptedAndOrphanBackups()
                 if jsonOutput {
@@ -516,8 +567,8 @@ public enum CLIRunner {
     @MainActor
     private static func usageText(_ localizer: AppLocalizer) -> String {
         localizer.L(
-            "Usage: LaunchLens --cli [list|orphans|frozen|audit] [--json] [--lang en|zh] [--ledger-dir <dir>] [--agents-dir <dir>]\n       LaunchLens --cli [freeze <label>|restore <id-or-label>|repair] [--json] [--lang en|zh] [--ledger-dir <dir>] [--agents-dir <dir>]",
-            "用法：LaunchLens --cli [list|orphans|frozen|audit] [--json] [--lang en|zh] [--ledger-dir <目录>] [--agents-dir <目录>]\n      LaunchLens --cli [freeze <服务标识>|restore <记录ID或服务标识>|repair] [--json] [--lang en|zh] [--ledger-dir <目录>] [--agents-dir <目录>]"
+            "Usage: LaunchLens --cli [list|orphans|frozen|audit] [--json] [--lang en|zh] [--ledger-dir <dir>] [--agents-dir <dir>]\n       LaunchLens --cli [freeze <label>|restore <id-or-label>|repair] --confirm [--json] [--lang en|zh] [--ledger-dir <dir>] [--agents-dir <dir>]",
+            "用法：LaunchLens --cli [list|orphans|frozen|audit] [--json] [--lang en|zh] [--ledger-dir <目录>] [--agents-dir <目录>]\n      LaunchLens --cli [freeze <服务标识>|restore <记录ID或服务标识>|repair] --confirm [--json] [--lang en|zh] [--ledger-dir <目录>] [--agents-dir <目录>]"
         )
     }
 }
