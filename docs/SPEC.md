@@ -3,7 +3,7 @@
 ## 1. Purpose & Reproducible Scope
 LaunchLens is a local, zero-network SwiftPM macOS 14+ application (main ledger window, menu bar popover, and headless CLI) that inspects `.plist` service definitions across user/global/system directories, correlates user-domain `launchctl list` PIDs with `ps` resident memory (`RSS`) and `lsof` listening TCP ports, and provides rollback-safe SHA-256 freeze and restore for user-owned `~/Library/LaunchAgents` items.
 
-## 2. Safety Invariants (Unreleased, after `v0.2.0`)
+## 2. Safety Invariants (since `v0.3.0`)
 1. **Strict Path Containment (`L8`)**: `FreezeLedgerStore.freeze` checks `lstat(2)` before symlink resolution, rejects symbolic links and non-regular files, resolves the canonical parent directory, and requires strict containment inside `userLaunchAgentsDirectory` (`~/Library/LaunchAgents` by default). Duplicate freezes for an existing `label` are rejected without touching existing snapshots.
 2. **Read-Only System Boundaries**: `/Library/LaunchDaemons`, `/Library/LaunchAgents`, and `com.apple.*` items are read-only in both UI and `FreezeLedgerStore`; LaunchLens never invokes `sudo`.
 3. **Zero Network Access**: `Sources/` contains zero network calls or telemetry.
@@ -30,7 +30,7 @@ LaunchLens is a local, zero-network SwiftPM macOS 14+ application (main ledger w
 - **User-Domain `RSS` Accounting Scope (`L7`)**: `LaunchScanner.scanLiveHost` queries unprivileged `/bin/launchctl list`, which reports PIDs in the current user GUI domain. Root/system-domain `LaunchDaemons` without user-domain PIDs appear with `Idle` / `0 MB` in M0, and helper child processes not directly listed as the `launchctl` PID are not yet summed into parent service RSS (scheduled for M1).
 - **Orphan Detection Heuristics (`L4, L5`)**: In M0, `LaunchScanner.correlate` matches `uid == currentUID && ppid == 1` processes not claimed by `launchctl list` using runtime command substrings (`node`, `python`, `uvx`, `mcp`, etc.) and skips paths containing `.app/Contents/`. On macOS, framework Python binaries (`Python.app/Contents/MacOS/Python`) are missed by that `.app/Contents/` exclusion, and non-daemon commands whose arguments contain hint substrings can match. Exact executable + script resolution is scheduled for M1.
 
-## 4. Targets & CLI Exit Codes (`L9`, Unreleased after `v0.2.0`)
+## 4. Targets & CLI Exit Codes (`L9`, since `v0.3.0`)
 - `LaunchLensCore`: `Models`, `Scanners`, `Services`, `CLI`, `Localization`, `ViewModels`, `Views`.
 - `LaunchLens`: Pre-GUI CLI entrypoint (`LaunchLensEntrypoint`) + SwiftUI app (`--demo` loads synthetic preview data with `[DEMO]` badges; default launch scans live host).
 - CLI exit codes:
