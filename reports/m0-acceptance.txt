@@ -13,8 +13,8 @@ LaunchLens M0 Acceptance Suite (Hermetic Temp Dir + Fake launchctl)
 [L14 PASS] Post-bootout crash recovery runs print pre-check, re-runs launchctl bootstrap, preserves state on non-zero exit, and clears record on exit 0.
 [L16 PASS] Pre-bootout crash recovery (print=0, bootstrap=5 via fake launchctl) skips bootstrap, cleans vault backup, and clears inProgress.
 [L17 PASS] Branch-2 failed-bootstrap recovery removes partial copy, preserves snapshot, downgrades to .frozen, and allows clean restore.
-[Row 7 PASS] LaunchLens --cli nosuchcmd --lang en -> exit code 2, stderr: Error: Unknown CLI subcommand 'nosuchcmd'. Supported subcommands: list, orphans, frozen, audit.
-[Row 7 PASS] LaunchLens --cli nosuchcmd --lang zh -> exit code 2, stderr: 错误：未知的命令行子命令「nosuchcmd」。支持的子命令：list、orphans、frozen、audit。
+[Row 7 PASS] LaunchLens --cli nosuchcmd --lang en -> exit code 2, stderr: Error: Unknown CLI subcommand 'nosuchcmd'. Supported subcommands: list, orphans, frozen, audit, freeze, restore, repair.
+[Row 7 PASS] LaunchLens --cli nosuchcmd --lang zh -> exit code 2, stderr: 错误：未知的命令行子命令「nosuchcmd」。支持的子命令：list、orphans、frozen、audit、freeze、restore、repair。
 [Row 8 / W1] Pre-warming isolated test build in temp workspace...
 [Row 8 / W1 PASS] M1 (Row 8: delete restore SHA-256 check) -> compiled, ran, and failed named test 'FreezeLedgerTests/testCorruptedSnapshotRejectedOnRestore' (exit 1).
 [Row 8 / W1 PASS] M2 (L19 & L13 & Row 2: bypass Step 1 vault writability preflight check in freeze) -> compiled, ran, and failed named test 'FreezeLedgerTests/testReadOnlyLedgerDirectoryAbortsBeforeBootout' (exit 1).

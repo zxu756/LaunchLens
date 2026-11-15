@@ -14,6 +14,14 @@ public struct LaunchctlResult: Equatable, Sendable {
     }
 }
 
+public enum FreezeStep: String, CaseIterable, Equatable, Sendable {
+    case afterWriteBackup
+    case afterWriteInProgress
+    case afterBootout
+    case afterRemoveOriginalPlist
+    case afterWriteFrozen
+}
+
 public protocol LaunchctlExecuting: Sendable {
     func runLaunchctl(_ arguments: [String]) -> LaunchctlResult
 }
@@ -96,6 +104,7 @@ public enum FreezeError: LocalizedError, Equatable {
     case restoreTargetConflict(RestoreConflictSummary)
     case bootstrapFailed(label: String, exitCode: Int32, stderr: String, snapshotPath: String)
     case recoveryBootstrapFailed(label: String, exitCode: Int32, stderr: String, plistPath: String, snapshotPath: String)
+    case recoveryPrintFailed(label: String, exitCode: Int32, stderr: String, plistPath: String, snapshotPath: String)
     case restoreWriteFailed(label: String, detail: String)
 
     public var errorDescription: String? {
@@ -142,6 +151,9 @@ public enum FreezeError: LocalizedError, Equatable {
         case let .recoveryBootstrapFailed(label, exitCode, stderr, plistPath, snapshotPath):
             let errNote = stderr.isEmpty ? "no stderr" : stderr
             return "[Startup Recovery launchctl bootstrap] bootstrap failed for '\(label)' with exit code \(exitCode) (\(errNote)). State: plist (\(plistPath)), verified backup (\(snapshotPath)), and inProgress recovery record preserved."
+        case let .recoveryPrintFailed(label, exitCode, stderr, plistPath, snapshotPath):
+            let errNote = stderr.isEmpty ? "no stderr" : stderr
+            return "[Startup Recovery launchctl print] Unexpected launchctl print failure for '\(label)' with exit code \(exitCode) (\(errNote)); refusing to assume service is unloaded. State: bootstrap was NOT run; plist (\(plistPath)), verified backup (\(snapshotPath)), and recovery state preserved."
         case let .restoreWriteFailed(label, detail):
             return "[Restore Step 2/4 Write Target] Failed writing restored plist for '\(label)' (\(detail)). State: backup and frozen ledger record preserved."
         }
@@ -249,6 +261,12 @@ public enum FreezeError: LocalizedError, Equatable {
                 self.errorDescription ?? "",
                 "[启动恢复 launchctl bootstrap] 重新加载「\(label)」失败，退出码 \(exitCode)（\(errNote)）。当前状态：配置文件（\(plistPath)）、备份文件（\(snapshotPath)）与「进行中」恢复记录均完整保留。"
             )
+        case let .recoveryPrintFailed(label, exitCode, stderr, plistPath, snapshotPath):
+            let errNote = stderr.isEmpty ? "无错误输出" : stderr
+            return localizer.L(
+                self.errorDescription ?? "",
+                "[启动恢复 launchctl print] 查询「\(label)」状态返回异常退出码 \(exitCode)（\(errNote)），拒绝盲目按未加载状态执行 bootstrap。当前状态：未调用 launchctl bootstrap，配置文件（\(plistPath)）、备份文件（\(snapshotPath)）与恢复记录均完整保留。"
+            )
         case let .restoreWriteFailed(label, detail):
             return localizer.L(
                 self.errorDescription ?? "",
@@ -268,6 +286,7 @@ public final class FreezeLedgerStore: @unchecked Sendable {
 
     private let launchctlExecutor: any LaunchctlExecuting
     private let ledgerWriteHook: (@Sendable (_ writeSequence: Int, _ records: [FreezeSnapshotRecord]) throws -> Void)?
+    private let stepHook: (@Sendable (FreezeStep) throws -> Void)?
     private let writeLock = NSLock()
     private var writeCounter: Int = 0
 
@@ -276,7 +295,8 @@ public final class FreezeLedgerStore: @unchecked Sendable {
         userLaunchAgentsDirectory: URL? = nil,
         uid: uid_t = getuid(),
         launchctlExecutor: (any LaunchctlExecuting)? = nil,
-        ledgerWriteHook: (@Sendable (_ writeSequence: Int, _ records: [FreezeSnapshotRecord]) throws -> Void)? = nil
+        ledgerWriteHook: (@Sendable (_ writeSequence: Int, _ records: [FreezeSnapshotRecord]) throws -> Void)? = nil,
+        stepHook: (@Sendable (FreezeStep) throws -> Void)? = nil
     ) {
         let base = vaultDirectory ?? FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/LaunchLens")
@@ -289,6 +309,7 @@ public final class FreezeLedgerStore: @unchecked Sendable {
         self.uid = uid
         self.launchctlExecutor = launchctlExecutor ?? SystemLaunchctlExecutor()
         self.ledgerWriteHook = ledgerWriteHook
+        self.stepHook = stepHook
     }
 
     public convenience init(
@@ -347,8 +368,20 @@ public final class FreezeLedgerStore: @unchecked Sendable {
 
     // MARK: - M0 Item 1 & Item 4: Rollback-Safe Transactional Freeze
 
+    private func notifyStep(_ step: FreezeStep, afterStep: ((FreezeStep) throws -> Void)?) throws {
+        if let stepHook {
+            try stepHook(step)
+        }
+        if let afterStep {
+            try afterStep(step)
+        }
+    }
+
     @discardableResult
-    public func freeze(item: LaunchItem) throws -> FreezeSnapshotRecord {
+    public func freeze(
+        item: LaunchItem,
+        afterStep: ((FreezeStep) throws -> Void)? = nil
+    ) throws -> FreezeSnapshotRecord {
         // Step 1/6: Precondition & path containment checks
         guard item.domain == .userAgent else {
             throw FreezeError.unsupportedDomain(item.domain.rawValue)
@@ -451,6 +484,7 @@ public final class FreezeLedgerStore: @unchecked Sendable {
             try? fm.removeItem(at: snapURL)
             throw FreezeError.backupWriteFailed(label: item.label, detail: error.localizedDescription)
         }
+        try notifyStep(.afterWriteBackup, afterStep: afterStep)
 
         // Step 3/6: Persist "inProgress" record to ledger BEFORE calling bootout or touching original plist
         var txRecord = FreezeSnapshotRecord(
@@ -475,6 +509,7 @@ public final class FreezeLedgerStore: @unchecked Sendable {
                 stateSummaryZH: "已清理临时备份，未调用 launchctl bootout，原 plist 仍完好保留在 \(canonicalSrcURL.path)。"
             )
         }
+        try notifyStep(.afterWriteInProgress, afterStep: afterStep)
 
         // Step 4/6: Unload service via launchctl bootout and require exitCode == 0
         let bootoutResult = launchctlExecutor.runLaunchctl(["bootout", "gui/\(uid)", canonicalSrcURL.path])
@@ -488,6 +523,7 @@ public final class FreezeLedgerStore: @unchecked Sendable {
                 originalPath: canonicalSrcURL.path
             )
         }
+        try notifyStep(.afterBootout, afterStep: afterStep)
 
         // Step 5/6: Move (do NOT delete!) original plist into staging directory next to Snapshots
         do {
@@ -507,6 +543,7 @@ public final class FreezeLedgerStore: @unchecked Sendable {
                 originalPath: canonicalSrcURL.path
             )
         }
+        try notifyStep(.afterRemoveOriginalPlist, afterStep: afterStep)
 
         // Re-verify backup integrity before committing final ledger state
         guard let verifySnap = try? Data(contentsOf: snapURL), Self.sha256Hex(verifySnap) == digest else {
@@ -525,8 +562,6 @@ public final class FreezeLedgerStore: @unchecked Sendable {
         txRecord.stagedPlistPath = nil
         do {
             try saveRecords([txRecord] + existingRecords)
-            try? fm.removeItem(at: stagedURL)
-            return txRecord
         } catch {
             // Reverse rollback of Step 5 & Step 4 so user never loses their service!
             var movedBack = false
@@ -549,6 +584,9 @@ public final class FreezeLedgerStore: @unchecked Sendable {
                 stateSummaryZH: stateZH
             )
         }
+        try notifyStep(.afterWriteFrozen, afterStep: afterStep)
+        try? fm.removeItem(at: stagedURL)
+        return txRecord
     }
 
     // MARK: - M0 Item 2: Safe Restore Without Data Loss or Silent Overwrite
@@ -764,7 +802,7 @@ public final class FreezeLedgerStore: @unchecked Sendable {
                     try? fm.removeItem(at: snapURL)
                     if let stagedURL { try? fm.removeItem(at: stagedURL) }
                     recoveredInProgress.append(rec.label)
-                } else {
+                } else if printRes.exitCode == 113 {
                     // Service is NOT loaded: re-bootstrap before removing backup or clearing inProgress
                     let res = launchctlExecutor.runLaunchctl(["bootstrap", "gui/\(uid)", dstURL.path])
                     if res.exitCode == 0 {
@@ -782,6 +820,17 @@ public final class FreezeLedgerStore: @unchecked Sendable {
                                 snapshotPath: snapURL.path
                             )
                         }
+                    }
+                } else {
+                    updatedRecords.append(rec)
+                    if firstRecoveryError == nil {
+                        firstRecoveryError = .recoveryPrintFailed(
+                            label: rec.label,
+                            exitCode: printRes.exitCode,
+                            stderr: printRes.stderr,
+                            plistPath: dstURL.path,
+                            snapshotPath: snapURL.path
+                        )
                     }
                 }
             } else if let sourceBytes = (try? Data(contentsOf: snapURL)) ?? stagedURL.flatMap({ try? Data(contentsOf: $0) }),
@@ -849,7 +898,7 @@ public final class FreezeLedgerStore: @unchecked Sendable {
                     continue
                 }
 
-                // Parse Label from orphaned plist (e.g. left behind by a prior L1 failure) and adopt into Vault
+                // Parse Label from orphaned plist (e.g. left behind by a prior L1 failure or pre-ledger crash)
                 let inferredLabel: String = {
                     if let raw = try? PropertyListSerialization.propertyList(from: bytes, options: [], format: nil),
                        let dict = raw as? [String: Any],
@@ -859,6 +908,39 @@ public final class FreezeLedgerStore: @unchecked Sendable {
                     }
                     return url.deletingPathExtension().lastPathComponent
                 }()
+
+                // L20: If a byte-identical plist still exists in LaunchAgents (e.g. crash right after Step 2
+                // backup write before Step 3 wrote ledger.json), do NOT falsely adopt an active service as frozen!
+                if let activePlistURL = findByteMatchingPlistInLaunchAgents(inferredLabel: inferredLabel, digest: digest) {
+                    let printRes = launchctlExecutor.runLaunchctl(["print", "gui/\(uid)/\(inferredLabel)"])
+                    if printRes.exitCode == 0 {
+                        try? fm.removeItem(at: url)
+                        cleanedDuplicates.append(url.path)
+                    } else if printRes.exitCode == 113 {
+                        let bootRes = launchctlExecutor.runLaunchctl(["bootstrap", "gui/\(uid)", activePlistURL.path])
+                        if bootRes.exitCode == 0 {
+                            try? fm.removeItem(at: url)
+                            cleanedDuplicates.append(url.path)
+                        } else if firstRecoveryError == nil {
+                            firstRecoveryError = .recoveryBootstrapFailed(
+                                label: inferredLabel,
+                                exitCode: bootRes.exitCode,
+                                stderr: bootRes.stderr,
+                                plistPath: activePlistURL.path,
+                                snapshotPath: url.path
+                            )
+                        }
+                    } else if firstRecoveryError == nil {
+                        firstRecoveryError = .recoveryPrintFailed(
+                            label: inferredLabel,
+                            exitCode: printRes.exitCode,
+                            stderr: printRes.stderr,
+                            plistPath: activePlistURL.path,
+                            snapshotPath: url.path
+                        )
+                    }
+                    continue
+                }
 
                 let destSnapURL: URL
                 if dir.standardizedFileURL == snapshotsDirectory.standardizedFileURL {
@@ -907,6 +989,34 @@ public final class FreezeLedgerStore: @unchecked Sendable {
     }
 
     // MARK: - Persistence & Helpers
+
+    private func findByteMatchingPlistInLaunchAgents(inferredLabel: String, digest: String) -> URL? {
+        let fm = FileManager.default
+        let directCandidate = userLaunchAgentsDirectory.appendingPathComponent("\(inferredLabel).plist")
+        var st = stat()
+        if lstat(directCandidate.path, &st) == 0,
+           (st.st_mode & S_IFMT) == S_IFREG,
+           let data = try? Data(contentsOf: directCandidate),
+           Self.sha256Hex(data) == digest {
+            return directCandidate.resolvingSymlinksInPath().standardizedFileURL
+        }
+        guard let urls = try? fm.contentsOfDirectory(
+            at: userLaunchAgentsDirectory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return nil
+        }
+        for candidate in urls.sorted(by: { $0.path < $1.path }) where candidate.pathExtension == "plist" {
+            var candStat = stat()
+            guard lstat(candidate.path, &candStat) == 0,
+                  (candStat.st_mode & S_IFMT) == S_IFREG,
+                  let data = try? Data(contentsOf: candidate),
+                  Self.sha256Hex(data) == digest else { continue }
+            return candidate.resolvingSymlinksInPath().standardizedFileURL
+        }
+        return nil
+    }
 
     private func verifyVaultWritablePreflight(requireSubdirectoriesWritable: Bool) throws {
         let fm = FileManager.default

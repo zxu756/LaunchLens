@@ -127,6 +127,8 @@ def expected_assertion_for(cmd: str):
         return ("exact_all", ["Test run with", "passed"])
     if cmd == "./Scripts/build-app.sh":
         return ("exact_all", ["✓ Built ", "build/LaunchLens.app"])
+    if "--cli list" in cmd and "--json" in cmd and "--agents-dir" in cmd:
+        return ("exact_all", ['"services"', '"io.fixture.readme-agent"', '"totalBackgroundRSSBytes"'])
     if "--cli list" in cmd and "--agents-dir" in cmd and "--lang en" in cmd:
         return ("exact_all", ["Total Non-Apple Background RSS", "io.fixture.readme-agent", "[User agent]"])
     if "--cli list" in cmd and "--agents-dir" in cmd and "--lang zh" in cmd:

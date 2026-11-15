@@ -1,0 +1,32 @@
+================================================================
+LaunchLens M1 Real-Environment Ledger & Orphan Verification Suite
+Date: 2026-11-15
+================================================================
+[Setup] Captured read-only pre-run host LaunchAgents snapshot (files=9, 0 private labels logged).
+[Setup] Building LaunchLens CLI binary (headless, zero GUI)...
+
+--- [Live Ledger Cross-Check: launchctl + ps + lsof + Orphan Injection] ---
+[M1 Row 1 PASS] Services matched 100%: total=15 (user=9, global=3, system=3), running=4 (multi_pid_trees=1), services_rss=77.02 MB, injected_orphan_rss=47.14 MB, total_non_apple_rss=124.16 MB, max_rss_diff=0.0000% (0.0 KB, threshold <= 5.0%).
+[M1 Row 2 PASS] Listening TCP port set matched lsof 100%: tracked_unique_ports=4 (ref_lsof_ports=4), excluded_gui_or_system_listener_pids=11, unaccounted_listeners=0.
+[M1 Row 3 PASS] Orphan detection verified: spawned_orphans_detected=2/2 (node port=49865, python3 port=49863), preexisting_host_orphans=0, live_parent_node_modules_false_positives=0 (ppid=54877, port=49864), gui_app_false_positives=0 (across 132 live .app processes), foreign_uid_false_positives=0.
+
+--- [Row 4: Opt-In Real launchd Freeze/Restore & Mid-Freeze Kill Check] ---
+[M1 Row 4 SKIPPED] Real launchd freeze/restore + mid-freeze SIGKILL recovery (LAUNCHLENS_REAL_LAUNCHD!=1): 没跑
+
+--- [Isolated Temporary Code Mutation Checks (M1 + L20: 8/8)] ---
+[Mutation Setup] Building baseline isolated workspace in <TMP_ROOT>/mut_ws...
+[Mutation M1_L4_PYTHON_APP PASS] Killed by ScannerCorrelationTests/testM1OrphanPythonAppVsGenuineGUIAppExclusion (swift test exit=1, workspace restored).
+[Mutation M1_L5_EXACT_BASENAME PASS] Killed by ScannerCorrelationTests/testM1OrphanExactBasenameAndInterpreterScriptClassification (swift test exit=1, workspace restored).
+[Mutation M1_L5_INTERPRETER_TARGET PASS] Killed by ScannerCorrelationTests/testM1OrphanExactBasenameAndInterpreterScriptClassification (swift test exit=1, workspace restored).
+[Mutation M1_L7_DESCENDANT_RSS PASS] Killed by ScannerCorrelationTests/testM1ServiceDescendantTreeRSSDeduplicationAndSystemDaemonProgramMatch (swift test exit=1, workspace restored).
+[Mutation M1_L20_PRELEDGER_BACKUP PASS] Killed by FreezeLedgerTests/testL20MidFreezeStepInjectionCrashAndRecoveryAtEveryStep (swift test exit=1, workspace restored).
+[Mutation M1_L20_PREFLIGHT_ANCESTOR PASS] Killed by FreezeLedgerTests/testL20PreflightAncestorDirectoryWritability (swift test exit=1, workspace restored).
+[Mutation M1_L20_PREFLIGHT_SUBDIR PASS] Killed by FreezeLedgerTests/testL20PreflightSubdirectoryWritability (swift test exit=1, workspace restored).
+[Mutation M1_L20_PRINT_EXITCODE PASS] Killed by FreezeLedgerTests/testL20UnexpectedLaunchctlPrintFailurePreservesStateWithoutBootstrapping (swift test exit=1, workspace restored).
+
+--- [Host Read-Only Non-Mutation Verification] ---
+[Host Guard PASS] ~/Library/LaunchAgents (9 files) and vault state 100% unchanged (sha256 + mtime_ns verified).
+================================================================
+M1 LEDGER VERIFICATION COMPLETED (EXECUTED CHECKS PASSED; SKIPPED CHECKS SEPARATE)
+================================================================
+[M1 Summary] passed=12 failed=0 skipped=1

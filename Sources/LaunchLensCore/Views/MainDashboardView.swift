@@ -271,7 +271,7 @@ public struct MainDashboardView: View {
                 ledgerMetricCell(
                     value: ByteFormatter.memory(monitor.snapshot.totalBackgroundRSSBytes),
                     label: localizer.L("Background resident RAM", "后台常驻内存 (RSS)"),
-                    detail: localizer.L("User launchctl PIDs + orphans", "用户域 launchctl 与孤儿进程"),
+                    detail: localizer.L("Service process trees + orphans", "服务进程树与孤儿进程"),
                     accent: LedgerTheme.ink
                 )
                 verticalRule
