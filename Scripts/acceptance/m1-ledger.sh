@@ -107,7 +107,7 @@ PYEOF
 {
     echo "================================================================"
     echo "LaunchLens M1 Real-Environment Ledger & Orphan Verification Suite"
-    echo "Date: 2026-11-15"
+    echo "Date: $(date +%Y-%m-%d)"
     echo "================================================================"
 
     snapshot_host_state "$HOST_BEFORE"
@@ -191,7 +191,7 @@ s.listen(5)
 port = s.getsockname()[1]
 with open(info_path, "w", encoding="utf-8") as f:
     json.dump({"pid": os.getpid(), "port": port}, f)
-time.sleep(120)
+time.sleep(300)
 """,
     encoding="utf-8",
 )
@@ -233,7 +233,7 @@ parent_holder = subprocess.Popen(
         "import subprocess, sys, time; "
         "p = subprocess.Popen([sys.argv[1], sys.argv[2], sys.argv[3]], "
         "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
-        "time.sleep(120)",
+        "time.sleep(300)",
         node_bin,
         str(live_worker_js),
         str(live_worker_info),
@@ -279,31 +279,34 @@ while time.time() < reparent_deadline:
         break
     time.sleep(0.05)
 
-# 2. Capture bracketed before/after system truth around `LaunchLens --cli list --json` (LR1):
-#    ps_before runs immediately before LaunchLens, and ps_after runs immediately after LaunchLens,
-#    eliminating false 5% drift when another service spawns or reaps children during slow lsof scans.
+# 2. Run width-capped (<=25%, up to 3 retries) bracketed before -> LaunchLens -> after verification (LR1 & LR2)
 empty_vault = tmp_root / "empty_vault"
-before_dir = tmp_root / "snap_before"
-after_dir = tmp_root / "snap_after"
-before_dir.mkdir(parents=True, exist_ok=True)
-after_dir.mkdir(parents=True, exist_ok=True)
-cli_json_path = tmp_root / "cli_list.json"
+user_agents_dir = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, "Library/LaunchAgents")
 
 try:
-    lctl_before = subprocess.check_output(["/bin/launchctl", "list"], text=True)
-    lsof_before = subprocess.check_output(["/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], text=True)
-    ps_before = subprocess.check_output(["/bin/ps", "-axo", "pid,ppid,uid,rss,args"], text=True)
-
-    cli_raw = subprocess.check_output(
-        [bin_path, "--cli", "list", "--json", "--ledger-dir", str(empty_vault), "--lang", "en"],
-        text=True,
+    verify_res = subprocess.run(
+        [
+            sys.executable,
+            ref_verifier_py,
+            "--live-capture",
+            "--bin-path", str(bin_path),
+            "--ledger-dir", str(empty_vault),
+            "--work-dir", str(tmp_root),
+            "--max-retries", "3",
+            "--user-agents-dir", user_agents_dir,
+            "--current-uid", str(os.getuid()),
+            "--node-pid", str(node_pid),
+            "--node-port", str(node_port),
+            "--py-pid", str(py_pid),
+            "--py-port", str(py_port),
+            "--live-child-pid", str(live_child_pid),
+            "--live-child-ppid", str(live_child_ppid),
+            "--live-child-port", str(live_child_port),
+        ],
+        check=False,
     )
-
-    ps_after = subprocess.check_output(["/bin/ps", "-axo", "pid,ppid,uid,rss,args"], text=True)
-    lctl_after = subprocess.check_output(["/bin/launchctl", "list"], text=True)
-    lsof_after = subprocess.check_output(["/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN"], text=True)
 finally:
-    # 3. Always tear down all spawned test processes immediately after capture
+    # 3. Always tear down all spawned test processes immediately after verification
     for pid in (live_child_pid, parent_holder.pid, node_pid, py_pid):
         try:
             os.kill(pid, signal.SIGKILL)
@@ -321,37 +324,8 @@ for pid in (node_pid, py_pid, live_child_pid, parent_holder.pid):
     if rc == 0:
         raise RuntimeError(f"Residual spawned test process still alive: PID {pid}")
 
-(before_dir / "launchctl-list.txt").write_text(lctl_before, encoding="utf-8")
-(before_dir / "ps-axo.txt").write_text(ps_before, encoding="utf-8")
-(before_dir / "lsof-listen.txt").write_text(lsof_before, encoding="utf-8")
-
-(after_dir / "launchctl-list.txt").write_text(lctl_after, encoding="utf-8")
-(after_dir / "ps-axo.txt").write_text(ps_after, encoding="utf-8")
-(after_dir / "lsof-listen.txt").write_text(lsof_after, encoding="utf-8")
-
-cli_json_path.write_text(cli_raw, encoding="utf-8")
-
-# 4. Run independent bottom-up reference verifier (LR1 & LR2)
-user_agents_dir = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, "Library/LaunchAgents")
-subprocess.run(
-    [
-        sys.executable,
-        ref_verifier_py,
-        "--before-dir", str(before_dir),
-        "--after-dir", str(after_dir),
-        "--cli-json", str(cli_json_path),
-        "--user-agents-dir", user_agents_dir,
-        "--current-uid", str(os.getuid()),
-        "--node-pid", str(node_pid),
-        "--node-port", str(node_port),
-        "--py-pid", str(py_pid),
-        "--py-port", str(py_port),
-        "--live-child-pid", str(live_child_pid),
-        "--live-child-ppid", str(live_child_ppid),
-        "--live-child-port", str(live_child_port),
-    ],
-    check=True,
-)
+if verify_res.returncode != 0:
+    sys.exit(verify_res.returncode)
 PYEOF
 
     echo ""

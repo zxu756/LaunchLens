@@ -693,17 +693,18 @@ struct ScannerCorrelationTests {
         try Data(lctlText.utf8).write(to: beforeDir.appendingPathComponent("launchctl-list.txt"))
         try Data(lctlText.utf8).write(to: afterDir.appendingPathComponent("launchctl-list.txt"))
 
-        // Before snapshot: root 1000 alone = 14,100 KB (14,438,400 B)
+        // Before snapshot: root 1000 alone = 100,000 KB (102,400,000 B)
         try Data("""
           PID  PPID   UID    RSS ARGS
             1     0     0  15000 /sbin/launchd
            88     1     0   4000 /Library/PrivilegedHelperTools/com.example.rootd
-          500     1   501   3000 -zsh
+          499     1     0   2000 /usr/bin/login
+          500   499   501   3000 -zsh
           507     1   501   5000 /usr/libexec/rapportd
           610     1   501  90000 /Applications/ExampleApp.app/Contents/MacOS/ExampleApp
-          700     1   501   2500 -zsh
+          700   499   501   2500 -zsh
           710   700   501  12000 /opt/homebrew/bin/python3 /tmp/session_worker.py
-         1000     1   501  14100 /opt/example/bin/test-svc
+         1000     1   501 100000 /opt/example/bin/test-svc
          2001     1   501  38000 /opt/homebrew/bin/node /tmp/m1_orphan_node_probe.js
          2002     1   501  10000 /opt/homebrew/bin/python3 /tmp/m1_orphan_py_probe.py
          2003   500   501  16000 /opt/homebrew/bin/node /tmp/node_modules/.bin/live_parent_worker.js
@@ -711,19 +712,19 @@ struct ScannerCorrelationTests {
          9002  9001   501   1024 /opt/example/bin/cycle-b
         """.utf8).write(to: beforeDir.appendingPathComponent("ps-axo.txt"))
 
-        // After snapshot: root 1000 spawned child 1001 + grandchild 1002 -> 14,100 + 200,000 + 266,386 = 480,486 KB (492,017,664 B)
+        // After snapshot: root 1000 spawned child 1001 (+10,000 KB -> 110,000 KB = +10.0% <= 25% width cap)
         try Data("""
           PID  PPID   UID    RSS ARGS
             1     0     0  15000 /sbin/launchd
            88     1     0   4000 /Library/PrivilegedHelperTools/com.example.rootd
-          500     1   501   3000 -zsh
+          499     1     0   2000 /usr/bin/login
+          500   499   501   3000 -zsh
           507     1   501   5000 /usr/libexec/rapportd
           610     1   501  90000 /Applications/ExampleApp.app/Contents/MacOS/ExampleApp
-          700     1   501   2500 -zsh
+          700   499   501   2500 -zsh
           710   700   501  12000 /opt/homebrew/bin/python3 /tmp/session_worker.py
-         1000     1   501  14100 /opt/example/bin/test-svc
-         1001  1000   501 200000 /opt/example/bin/test-svc-worker
-         1002  1001   501 266386 /opt/example/bin/test-svc-subworker
+         1000     1   501 100000 /opt/example/bin/test-svc
+         1001  1000   501  10000 /opt/example/bin/test-svc-worker
          2001     1   501  38000 /opt/homebrew/bin/node /tmp/m1_orphan_node_probe.js
          2002     1   501  10000 /opt/homebrew/bin/python3 /tmp/m1_orphan_py_probe.py
          2003   500   501  16000 /opt/homebrew/bin/node /tmp/node_modules/.bin/live_parent_worker.js
@@ -795,13 +796,13 @@ struct ScannerCorrelationTests {
             try Data(json.utf8).write(to: url)
         }
 
-        func runRefVerifier(cliJSONURL: URL) throws -> (exitCode: Int32, stdout: String, stderr: String) {
+        func runRefVerifier(before: URL = beforeDir, after: URL = afterDir, cliJSONURL: URL) throws -> (exitCode: Int32, stdout: String, stderr: String) {
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
             proc.arguments = [
                 refScriptURL.path,
-                "--before-dir", beforeDir.path,
-                "--after-dir", afterDir.path,
+                "--before-dir", before.path,
+                "--after-dir", after.path,
                 "--cli-json", cliJSONURL.path,
                 "--user-agents-dir", userAgentsDir.path,
                 "--global-agents-dir", globalAgentsDir.path,
@@ -826,11 +827,11 @@ struct ScannerCorrelationTests {
             )
         }
 
-        // Case A: Mid-scan child tree spawn (14.44 MB before -> 492.02 MB in CLI & after) passes with 0.0000% bracket diff
-        let validCLIURL = tempRoot.appendingPathComponent("cli-valid.json")
-        try writeCLIJSON(to: validCLIURL, serviceRSSBytes: 480_486 * 1024)
+        // Case A: Stable 10% bracket shift (100,000 KB before -> 110,000 KB after, product 105,000 KB inside bracket) passes with 0.0000% diff
+        let validCLIURL = tempRoot.appendingPathComponent("cli-valid-10pct.json")
+        try writeCLIJSON(to: validCLIURL, serviceRSSBytes: 105_000 * 1024)
         let passRun = try runRefVerifier(cliJSONURL: validCLIURL)
-        #expect(passRun.exitCode == 0, "Expected bracketed mid-scan shift to pass, got stderr: \(passRun.stderr)")
+        #expect(passRun.exitCode == 0, "Expected stable 10% bracketed sample to pass, got stderr: \(passRun.stderr)")
         #expect(passRun.stdout.contains("[M1 Row 1 PASS]"))
         #expect(passRun.stdout.contains("max_rss_diff=0.0000%"))
         #expect(passRun.stdout.contains("[M1 Row 2 PASS]"))
@@ -845,12 +846,452 @@ struct ScannerCorrelationTests {
         #expect(passRun.stdout.contains("unaccounted_listeners=0"))
         #expect(passRun.stdout.contains("[M1 Row 3 PASS]"))
 
-        // Case B: Out-of-bracket >5% deviation (600,000 KB vs max 480,486 KB = +24.87%) MUST fail AND print host uptime
+        // Case B: Out-of-bracket >5% deviation on stable 10% bracket (130,000 KB vs max 110,000 KB = +18.18%) MUST fail AND print host uptime
         let badCLIURL = tempRoot.appendingPathComponent("cli-bad.json")
-        try writeCLIJSON(to: badCLIURL, serviceRSSBytes: 600_000 * 1024)
+        try writeCLIJSON(to: badCLIURL, serviceRSSBytes: 130_000 * 1024)
         let failRun = try runRefVerifier(cliJSONURL: badCLIURL)
         #expect(failRun.exitCode != 0)
         #expect(failRun.stderr.contains("exceeded 5%"))
         #expect(failRun.stderr.lowercased().contains("load averages:"), "Failure diagnostic must print uptime load averages, got: \(failRun.stderr)")
+
+        // Case C: Unstable wide bracket (14 MB before -> 480 MB after, product 247 MB in the middle) MUST fail (> 25% width cap) AND print before/after + uptime
+        let wideBeforeDir = tempRoot.appendingPathComponent("wide_before")
+        let wideAfterDir = tempRoot.appendingPathComponent("wide_after")
+        try fm.createDirectory(at: wideBeforeDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: wideAfterDir, withIntermediateDirectories: true)
+        try Data(lctlText.utf8).write(to: wideBeforeDir.appendingPathComponent("launchctl-list.txt"))
+        try Data(lctlText.utf8).write(to: wideAfterDir.appendingPathComponent("launchctl-list.txt"))
+        try Data(lsofBefore.utf8).write(to: wideBeforeDir.appendingPathComponent("lsof-listen.txt"))
+        try Data(lsofAfter.utf8).write(to: wideAfterDir.appendingPathComponent("lsof-listen.txt"))
+        // 14 MB = 14,336 KB (14,680,064 B); 480 MB = 491,520 KB (503,316,480 B)
+        try Data("""
+          PID  PPID   UID    RSS ARGS
+            1     0     0  15000 /sbin/launchd
+           88     1     0   4000 /Library/PrivilegedHelperTools/com.example.rootd
+          499     1     0   2000 /usr/bin/login
+          500   499   501   3000 -zsh
+          507     1   501   5000 /usr/libexec/rapportd
+          610     1   501  90000 /Applications/ExampleApp.app/Contents/MacOS/ExampleApp
+          700   499   501   2500 -zsh
+          710   700   501  12000 /opt/homebrew/bin/python3 /tmp/session_worker.py
+         1000     1   501  14336 /opt/example/bin/test-svc
+         2001     1   501  38000 /opt/homebrew/bin/node /tmp/m1_orphan_node_probe.js
+         2002     1   501  10000 /opt/homebrew/bin/python3 /tmp/m1_orphan_py_probe.py
+         2003   500   501  16000 /opt/homebrew/bin/node /tmp/node_modules/.bin/live_parent_worker.js
+        """.utf8).write(to: wideBeforeDir.appendingPathComponent("ps-axo.txt"))
+        try Data("""
+          PID  PPID   UID    RSS ARGS
+            1     0     0  15000 /sbin/launchd
+           88     1     0   4000 /Library/PrivilegedHelperTools/com.example.rootd
+          499     1     0   2000 /usr/bin/login
+          500   499   501   3000 -zsh
+          507     1   501   5000 /usr/libexec/rapportd
+          610     1   501  90000 /Applications/ExampleApp.app/Contents/MacOS/ExampleApp
+          700   499   501   2500 -zsh
+          710   700   501  12000 /opt/homebrew/bin/python3 /tmp/session_worker.py
+         1000     1   501  14336 /opt/example/bin/test-svc
+         1001  1000   501 477184 /opt/example/bin/test-svc-worker
+         2001     1   501  38000 /opt/homebrew/bin/node /tmp/m1_orphan_node_probe.js
+         2002     1   501  10000 /opt/homebrew/bin/python3 /tmp/m1_orphan_py_probe.py
+         2003   500   501  16000 /opt/homebrew/bin/node /tmp/node_modules/.bin/live_parent_worker.js
+        """.utf8).write(to: wideAfterDir.appendingPathComponent("ps-axo.txt"))
+
+        let wideMidCLIURL = tempRoot.appendingPathComponent("cli-wide-mid.json")
+        try writeCLIJSON(to: wideMidCLIURL, serviceRSSBytes: 247 * 1024 * 1024)
+        let wideFailRun = try runRefVerifier(before: wideBeforeDir, after: wideAfterDir, cliJSONURL: wideMidCLIURL)
+        #expect(wideFailRun.exitCode != 0, "14 MB -> 480 MB wide bracket with middle product value MUST fail (>25% cap), not pass!")
+        #expect(!wideFailRun.stdout.contains("PASS"))
+        #expect(!wideFailRun.stdout.contains("SKIPPED"))
+        #expect(wideFailRun.stderr.contains("14680064"))
+        #expect(wideFailRun.stderr.contains("503316480"))
+        #expect(wideFailRun.stderr.lowercased().contains("load averages:"))
+    }
+
+    @Test("LR1 Cap & Retry: Enforces 25% bracket width cap (with 64KB small-amount exemption), retries up to 3 rounds, and fails with per-round before/after & uptime after 3 unstable retries")
+    func testLR1BracketWidthCapResamplingUpToThreeRetriesAndExhaustionFailure() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let refScriptURL = repoRoot.appendingPathComponent("Scripts/acceptance/m1_ledger_ref.py")
+        let fm = FileManager.default
+
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensLR1CapRetry-\(UUID().uuidString)")
+        let userAgentsDir = tempRoot.appendingPathComponent("UserAgents")
+        let globalAgentsDir = tempRoot.appendingPathComponent("GlobalAgents")
+        let systemDaemonsDir = tempRoot.appendingPathComponent("SystemDaemons")
+        try fm.createDirectory(at: userAgentsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: globalAgentsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: systemDaemonsDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        try Data("""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>io.test.svc</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>/opt/example/bin/test-svc</string>
+            </array>
+        </dict>
+        </plist>
+        """.utf8).write(to: userAgentsDir.appendingPathComponent("io.test.svc.plist"))
+
+        let lctlText = """
+        PID\tStatus\tLabel
+        1000\t0\tio.test.svc
+        """
+        let lsofText = """
+        COMMAND     PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+        test-svc   1000 dev    8u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:18080 (LISTEN)
+        node       2001 dev   10u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:19001 (LISTEN)
+        python3    2002 dev   11u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:19002 (LISTEN)
+        node       2003 dev   12u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:19003 (LISTEN)
+        """
+
+        func makeRoundDir(name: String, beforeSvcKB: Int64, afterSvcKB: Int64, cliSvcKB: Int64) throws -> URL {
+            let rDir = tempRoot.appendingPathComponent(name)
+            let bDir = rDir.appendingPathComponent("before")
+            let aDir = rDir.appendingPathComponent("after")
+            try fm.createDirectory(at: bDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: aDir, withIntermediateDirectories: true)
+            try Data(lctlText.utf8).write(to: bDir.appendingPathComponent("launchctl-list.txt"))
+            try Data(lctlText.utf8).write(to: aDir.appendingPathComponent("launchctl-list.txt"))
+            try Data(lsofText.utf8).write(to: bDir.appendingPathComponent("lsof-listen.txt"))
+            try Data(lsofText.utf8).write(to: aDir.appendingPathComponent("lsof-listen.txt"))
+
+            func psFor(_ svcKB: Int64) -> String {
+                """
+                  PID  PPID   UID    RSS ARGS
+                    1     0     0  15000 /sbin/launchd
+                  499     1     0   2000 /usr/bin/login
+                  500   499   501   3000 -zsh
+                 1000     1   501  \(svcKB) /opt/example/bin/test-svc
+                 2001     1   501  38000 /opt/homebrew/bin/node /tmp/m1_orphan_node_probe.js
+                 2002     1   501  10000 /opt/homebrew/bin/python3 /tmp/m1_orphan_py_probe.py
+                 2003   500   501  16000 /opt/homebrew/bin/node /tmp/node_modules/.bin/live_parent_worker.js
+                """
+            }
+            try Data(psFor(beforeSvcKB).utf8).write(to: bDir.appendingPathComponent("ps-axo.txt"))
+            try Data(psFor(afterSvcKB).utf8).write(to: aDir.appendingPathComponent("ps-axo.txt"))
+
+            let orphanBytes: Int64 = (38_000 + 10_000) * 1024
+            let svcBytes = cliSvcKB * 1024
+            let cliJSON = """
+            {
+              "orphanRSSBytes": \(orphanBytes),
+              "totalBackgroundRSSBytes": \(svcBytes + orphanBytes),
+              "services": [
+                {
+                  "domain": "User LaunchAgent",
+                  "isAppleSystem": false,
+                  "label": "io.test.svc",
+                  "listeningPorts": [18080],
+                  "pid": 1000,
+                  "rssBytes": \(svcBytes)
+                }
+              ],
+              "orphans": [
+                {
+                  "domain": "Orphaned Process",
+                  "isAppleSystem": false,
+                  "label": "node (m1_orphan_node_probe.js)",
+                  "listeningPorts": [19001],
+                  "pid": 2001,
+                  "rssBytes": \(38_000 * 1024)
+                },
+                {
+                  "domain": "Orphaned Process",
+                  "isAppleSystem": false,
+                  "label": "python3 (m1_orphan_py_probe.py)",
+                  "listeningPorts": [19002],
+                  "pid": 2002,
+                  "rssBytes": \(10_000 * 1024)
+                }
+              ]
+            }
+            """
+            try Data(cliJSON.utf8).write(to: rDir.appendingPathComponent("cli.json"))
+            return rDir
+        }
+
+        func runRounds(_ roundDirs: [URL], maxRetries: Int = 3) throws -> (exitCode: Int32, stdout: String, stderr: String) {
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            var args = [
+                refScriptURL.path,
+                "--max-retries", "\(maxRetries)",
+                "--user-agents-dir", userAgentsDir.path,
+                "--global-agents-dir", globalAgentsDir.path,
+                "--system-daemons-dir", systemDaemonsDir.path,
+                "--current-uid", "501",
+                "--node-pid", "2001", "--node-port", "19001",
+                "--py-pid", "2002", "--py-port", "19002",
+                "--live-child-pid", "2003", "--live-child-ppid", "500", "--live-child-port", "19003",
+                "--round-dirs"
+            ]
+            args.append(contentsOf: roundDirs.map(\.path))
+            proc.arguments = args
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError = errPipe
+            try proc.run()
+            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            return (
+                proc.terminationStatus,
+                String(data: outData, encoding: .utf8) ?? "",
+                String(data: errData, encoding: .utf8) ?? ""
+            )
+        }
+
+        // 1. 64KB small-amount exemption: 120 KB -> 168 KB (+40% > 25%, abs diff 48 KB <= 64 KB) passes; 120 KB -> 220 KB (abs diff 100 KB > 64 KB) fails
+        let tinyExemptRound = try makeRoundDir(name: "tiny_exempt", beforeSvcKB: 120, afterSvcKB: 168, cliSvcKB: 144)
+        let tinyPass = try runRounds([tinyExemptRound], maxRetries: 0)
+        #expect(tinyPass.exitCode == 0, "Expected <=64KB small-process diff to be exempted, stderr: \(tinyPass.stderr)")
+
+        let tinyExceedRound = try makeRoundDir(name: "tiny_exceed", beforeSvcKB: 120, afterSvcKB: 220, cliSvcKB: 170)
+        let tinyFail = try runRounds([tinyExceedRound], maxRetries: 0)
+        #expect(tinyFail.exitCode != 0, "Expected >25% & >64KB diff to fail")
+
+        // 2. Resampling succeeds within <= 3 retries: Round 1 unstable (14MB->480MB), Retry 1 unstable (480MB->14MB), Retry 2 stable (100MB->110MB, 10%)
+        let u1 = try makeRoundDir(name: "u1", beforeSvcKB: 14 * 1024, afterSvcKB: 480 * 1024, cliSvcKB: 247 * 1024)
+        let u2 = try makeRoundDir(name: "u2", beforeSvcKB: 480 * 1024, afterSvcKB: 14 * 1024, cliSvcKB: 200 * 1024)
+        let s3 = try makeRoundDir(name: "s3", beforeSvcKB: 100 * 1024, afterSvcKB: 110 * 1024, cliSvcKB: 105 * 1024)
+        let retryPass = try runRounds([u1, u2, s3], maxRetries: 3)
+        #expect(retryPass.exitCode == 0, "Expected retry 2 (10% bracket) to succeed after discarding 2 unstable rounds, stderr: \(retryPass.stderr)")
+        #expect(retryPass.stdout.contains("[M1 Row 1 PASS]"))
+
+        // 3. Exhausting all 3 retries (initial + 3 retries = 4 unstable rounds; 5th stable round ignored) MUST fail (neither pass nor skip) and print EVERY round's before/after + uptime
+        let ex1 = try makeRoundDir(name: "ex1", beforeSvcKB: 14_000, afterSvcKB: 480_000, cliSvcKB: 200_000)
+        let ex2 = try makeRoundDir(name: "ex2", beforeSvcKB: 16_000, afterSvcKB: 460_000, cliSvcKB: 200_000)
+        let ex3 = try makeRoundDir(name: "ex3", beforeSvcKB: 18_000, afterSvcKB: 440_000, cliSvcKB: 200_000)
+        let ex4 = try makeRoundDir(name: "ex4", beforeSvcKB: 20_000, afterSvcKB: 420_000, cliSvcKB: 200_000)
+        let ex5TooLate = try makeRoundDir(name: "ex5_ignored", beforeSvcKB: 100_000, afterSvcKB: 105_000, cliSvcKB: 102_000)
+        let retryExhausted = try runRounds([ex1, ex2, ex3, ex4, ex5TooLate], maxRetries: 3)
+        #expect(retryExhausted.exitCode != 0, "All 3 retries unstable MUST fail")
+        #expect(!retryExhausted.stdout.contains("PASS"))
+        #expect(!retryExhausted.stdout.contains("SKIPPED"))
+        // Must contain before & after bytes for all 4 attempted rounds (initial + 3 retries)
+        for expectedBytes in [
+            14_000 * 1024, 480_000 * 1024,
+            16_000 * 1024, 460_000 * 1024,
+            18_000 * 1024, 440_000 * 1024,
+            20_000 * 1024, 420_000 * 1024
+        ] {
+            #expect(retryExhausted.stderr.contains("\(expectedBytes)"), "Missing per-round reference value \(expectedBytes) in stderr: \(retryExhausted.stderr)")
+        }
+        let uptimeMentions = retryExhausted.stderr.lowercased().components(separatedBy: "load averages:").count - 1
+        #expect(uptimeMentions >= 4, "Expected uptime load averages for each of the 4 unstable rounds, got \(uptimeMentions) in: \(retryExhausted.stderr)")
+    }
+
+    @Test("LR1 Orphan RSS & Dynamic Date: Verifies orphanRSSBytes with bracket + 25% width cap and checks m1-ledger.sh uses runtime date")
+    func testLR1OrphanRSSBytesBracketWidthCapAndDynamicLedgerDate() throws {
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let refScriptURL = repoRoot.appendingPathComponent("Scripts/acceptance/m1_ledger_ref.py")
+        let ledgerShURL = repoRoot.appendingPathComponent("Scripts/acceptance/m1-ledger.sh")
+        let fm = FileManager.default
+
+        // Item 3: m1-ledger.sh must NOT hardcode "Date: 2026-11-15", and must wire live resampling with max-retries=3
+        let shSource = try String(contentsOf: ledgerShURL, encoding: .utf8)
+        #expect(!shSource.contains("Date: 2026-11-15"), "m1-ledger.sh must use runtime date instead of hardcoded 2026-11-15")
+        #expect(shSource.contains("date +%Y-%m-%d"))
+        #expect(shSource.contains("\"--live-capture\""))
+        #expect(shSource.contains("\"--max-retries\", \"3\""))
+
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensLR1OrphanCap-\(UUID().uuidString)")
+        let userAgentsDir = tempRoot.appendingPathComponent("UserAgents")
+        let globalAgentsDir = tempRoot.appendingPathComponent("GlobalAgents")
+        let systemDaemonsDir = tempRoot.appendingPathComponent("SystemDaemons")
+        try fm.createDirectory(at: userAgentsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: globalAgentsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: systemDaemonsDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        try Data("""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>io.test.svc</string>
+            <key>ProgramArguments</key>
+            <array>
+                <string>/opt/example/bin/test-svc</string>
+            </array>
+        </dict>
+        </plist>
+        """.utf8).write(to: userAgentsDir.appendingPathComponent("io.test.svc.plist"))
+
+        let lctlText = "PID\tStatus\tLabel\n1000\t0\tio.test.svc\n"
+        let lsofText = """
+        COMMAND     PID USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME
+        test-svc   1000 dev    8u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:18080 (LISTEN)
+        node       2001 dev   10u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:19001 (LISTEN)
+        python3    2002 dev   11u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:19002 (LISTEN)
+        node       2003 dev   12u   IPv4 0x1000000000000000      0t0  TCP 127.0.0.1:19003 (LISTEN)
+        """
+
+        func runOrphanCase(
+            name: String,
+            beforeNodeKB: Int64,
+            afterNodeKB: Int64,
+            afterNodeChildKB: Int64 = 0,
+            pyKB: Int64 = 10_000,
+            cliNodeKB: Int64,
+            cliPyKB: Int64 = 10_000,
+            cliOrphanTotalKB: Int64
+        ) throws -> (exitCode: Int32, stdout: String, stderr: String) {
+            let cDir = tempRoot.appendingPathComponent(name)
+            let bDir = cDir.appendingPathComponent("before")
+            let aDir = cDir.appendingPathComponent("after")
+            try fm.createDirectory(at: bDir, withIntermediateDirectories: true)
+            try fm.createDirectory(at: aDir, withIntermediateDirectories: true)
+            try Data(lctlText.utf8).write(to: bDir.appendingPathComponent("launchctl-list.txt"))
+            try Data(lctlText.utf8).write(to: aDir.appendingPathComponent("launchctl-list.txt"))
+            try Data(lsofText.utf8).write(to: bDir.appendingPathComponent("lsof-listen.txt"))
+            try Data(lsofText.utf8).write(to: aDir.appendingPathComponent("lsof-listen.txt"))
+
+            let beforePS = """
+              PID  PPID   UID    RSS ARGS
+                1     0     0  15000 /sbin/launchd
+              499     1     0   2000 /usr/bin/login
+              500   499   501   3000 -zsh
+             1000     1   501  80000 /opt/example/bin/test-svc
+             2001     1   501  \(beforeNodeKB) /opt/homebrew/bin/node /tmp/m1_orphan_node_probe.js
+             2002     1   501  \(pyKB) /opt/homebrew/bin/python3 /tmp/m1_orphan_py_probe.py
+             2003   500   501  16000 /opt/homebrew/bin/node /tmp/node_modules/.bin/live_parent_worker.js
+            """
+            var afterPS = """
+              PID  PPID   UID    RSS ARGS
+                1     0     0  15000 /sbin/launchd
+              499     1     0   2000 /usr/bin/login
+              500   499   501   3000 -zsh
+             1000     1   501  80000 /opt/example/bin/test-svc
+             2001     1   501  \(afterNodeKB) /opt/homebrew/bin/node /tmp/m1_orphan_node_probe.js
+             2002     1   501  \(pyKB) /opt/homebrew/bin/python3 /tmp/m1_orphan_py_probe.py
+             2003   500   501  16000 /opt/homebrew/bin/node /tmp/node_modules/.bin/live_parent_worker.js
+            """
+            if afterNodeChildKB > 0 {
+                afterPS += "\n 2099  2001   501  \(afterNodeChildKB) /opt/homebrew/bin/node /tmp/m1_orphan_node_child.js\n"
+            }
+            try Data(beforePS.utf8).write(to: bDir.appendingPathComponent("ps-axo.txt"))
+            try Data(afterPS.utf8).write(to: aDir.appendingPathComponent("ps-axo.txt"))
+
+            let cliPath = cDir.appendingPathComponent("cli.json")
+            let svcBytes: Int64 = 80_000 * 1024
+            let orphanBytes: Int64 = cliOrphanTotalKB * 1024
+            try Data("""
+            {
+              "orphanRSSBytes": \(orphanBytes),
+              "totalBackgroundRSSBytes": \(svcBytes + orphanBytes),
+              "services": [
+                {
+                  "domain": "User LaunchAgent",
+                  "isAppleSystem": false,
+                  "label": "io.test.svc",
+                  "listeningPorts": [18080],
+                  "pid": 1000,
+                  "rssBytes": \(svcBytes)
+                }
+              ],
+              "orphans": [
+                {
+                  "domain": "Orphaned Process",
+                  "isAppleSystem": false,
+                  "label": "node (m1_orphan_node_probe.js)",
+                  "listeningPorts": [19001],
+                  "pid": 2001,
+                  "rssBytes": \(cliNodeKB * 1024)
+                },
+                {
+                  "domain": "Orphaned Process",
+                  "isAppleSystem": false,
+                  "label": "python3 (m1_orphan_py_probe.py)",
+                  "listeningPorts": [19002],
+                  "pid": 2002,
+                  "rssBytes": \(cliPyKB * 1024)
+                }
+              ]
+            }
+            """.utf8).write(to: cliPath)
+
+            let proc = Process()
+            proc.executableURL = URL(fileURLWithPath: "/usr/bin/python3")
+            proc.arguments = [
+                refScriptURL.path,
+                "--before-dir", bDir.path,
+                "--after-dir", aDir.path,
+                "--cli-json", cliPath.path,
+                "--user-agents-dir", userAgentsDir.path,
+                "--global-agents-dir", globalAgentsDir.path,
+                "--system-daemons-dir", systemDaemonsDir.path,
+                "--current-uid", "501",
+                "--node-pid", "2001", "--node-port", "19001",
+                "--py-pid", "2002", "--py-port", "19002",
+                "--live-child-pid", "2003", "--live-child-ppid", "500", "--live-child-port", "19003"
+            ]
+            let outPipe = Pipe()
+            let errPipe = Pipe()
+            proc.standardOutput = outPipe
+            proc.standardError = errPipe
+            try proc.run()
+            let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+            let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+            proc.waitUntilExit()
+            return (
+                proc.terminationStatus,
+                String(data: outData, encoding: .utf8) ?? "",
+                String(data: errData, encoding: .utf8) ?? ""
+            )
+        }
+
+        // 1. orphanRSSBytes > 5% outside stable orphan bracket (before=48,000 KB, after=50,400 KB, cli=60,000 KB -> +19.05%) MUST fail
+        let badOrphanDiff = try runOrphanCase(
+            name: "orphan_gt5pct",
+            beforeNodeKB: 38_000,
+            afterNodeKB: 40_400,
+            cliNodeKB: 50_000,
+            cliOrphanTotalKB: 60_000
+        )
+        #expect(badOrphanDiff.exitCode != 0, "orphanRSSBytes exceeding 5% of reference bracket MUST fail")
+        #expect(badOrphanDiff.stderr.contains("orphanRSSBytes"))
+        #expect(badOrphanDiff.stderr.contains("exceeded 5%"))
+        #expect(badOrphanDiff.stderr.lowercased().contains("load averages:"))
+
+        // 2. orphanRSSBytes wide bracket > 25% (before=48,000 KB, after=240,000 KB via child, cli=140,000 KB in middle) MUST fail
+        let wideOrphanBracket = try runOrphanCase(
+            name: "orphan_wide_gt25pct",
+            beforeNodeKB: 38_000,
+            afterNodeKB: 38_000,
+            afterNodeChildKB: 192_000,
+            cliNodeKB: 130_000,
+            cliOrphanTotalKB: 140_000
+        )
+        #expect(wideOrphanBracket.exitCode != 0, "Unstable >25% orphanRSSBytes bracket with middle CLI value MUST fail")
+        #expect(wideOrphanBracket.stderr.contains("orphanRSSBytes"))
+        #expect(wideOrphanBracket.stderr.contains("\(48_000 * 1024)"))
+        #expect(wideOrphanBracket.stderr.contains("\(240_000 * 1024)"))
+        #expect(wideOrphanBracket.stderr.lowercased().contains("load averages:"))
+
+        // 3. Stable 10% orphanRSSBytes bracket (before=50,000 KB, after=55,000 KB via child 5,000 KB, cli=52,500 KB inside) MUST pass
+        let okOrphanBracket = try runOrphanCase(
+            name: "orphan_ok_10pct",
+            beforeNodeKB: 40_000,
+            afterNodeKB: 40_000,
+            afterNodeChildKB: 5_000,
+            cliNodeKB: 42_500,
+            cliOrphanTotalKB: 52_500
+        )
+        #expect(okOrphanBracket.exitCode == 0, "Stable 10% orphanRSSBytes bracket should pass, stderr: \(okOrphanBracket.stderr)")
+        #expect(okOrphanBracket.stdout.contains("[M1 Row 1 PASS]"))
     }
 }
