@@ -1,0 +1,6 @@
+# SYNTHETIC TEST FIXTURE (handwritten synthetic sample, NOT a real-machine capture)
+# Purpose: synthetic edge cases for LaunchScanner parser comment handling and orphan correlation
+  PID  PPID   UID    RSS ARGS
+77001     1   501  51200 /opt/homebrew/Cellar/python@3.12/3.12.7/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python -m http.server 28080
+77002 77001   501  12800 /opt/homebrew/Cellar/python@3.12/3.12.7/Frameworks/Python.framework/Versions/3.12/Resources/Python.app/Contents/MacOS/Python -c "worker"
+77003   888   501  25600 node /tmp/synthetic/node_modules/.bin/jest-worker.js

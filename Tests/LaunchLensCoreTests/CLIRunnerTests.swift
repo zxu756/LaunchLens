@@ -204,6 +204,305 @@ struct CLIRunnerTests {
         #expect(readmeZH.contains("未检查 `launchctl` 退出码"))
         #expect(readmeZH.contains("LaunchLens --cli audit --lang zh"))
     }
+
+    @Test("M1 Item 3: Supports --json output flag across list, orphans, frozen, and audit subcommands")
+    @MainActor
+    func testM1CLIJsonOutputForListOrphansFrozenAndAudit() throws {
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensCLIJSON-\(UUID().uuidString)")
+        let vaultDir = tempRoot.appendingPathComponent("Vault")
+        let agentsDir = tempRoot.appendingPathComponent("LaunchAgents")
+        try fm.createDirectory(at: vaultDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let fixturePlist = agentsDir.appendingPathComponent("io.fixture.json-agent.plist")
+        let plistXML = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>io.fixture.json-agent</string>
+            <key>ProgramArguments</key>
+            <array><string>/usr/bin/true</string></array>
+        </dict>
+        </plist>
+        """
+        try Data(plistXML.utf8).write(to: fixturePlist)
+
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        let listOut = CLIRunner.execute(arguments: [
+            "LaunchLens", "--cli", "list", "--json", "--agents-dir", agentsDir.path, "--ledger-dir", vaultDir.path
+        ])
+        #expect(listOut.exitCode == 0)
+        #expect(listOut.stderr.isEmpty)
+        let listPayload = try decoder.decode(CLIListJSONPayload.self, from: Data(listOut.stdout.utf8))
+        #expect(listPayload.services.map(\.label) == ["io.fixture.json-agent"])
+        #expect(listPayload.items.contains(where: { $0.label == "io.fixture.json-agent" }))
+        #expect(listPayload.frozenRecords.isEmpty)
+
+        let orphansOut = CLIRunner.execute(arguments: [
+            "LaunchLens", "--cli", "orphans", "--json", "--agents-dir", agentsDir.path, "--ledger-dir", vaultDir.path
+        ])
+        #expect(orphansOut.exitCode == 0)
+        let orphansPayload = try decoder.decode(CLIOrphansJSONPayload.self, from: Data(orphansOut.stdout.utf8))
+        #expect(orphansPayload.orphanRSSBytes >= 0)
+
+        let frozenOut = CLIRunner.execute(arguments: [
+            "LaunchLens", "--cli", "frozen", "--json", "--ledger-dir", vaultDir.path
+        ])
+        #expect(frozenOut.exitCode == 0)
+        let frozenPayload = try decoder.decode(CLIFrozenJSONPayload.self, from: Data(frozenOut.stdout.utf8))
+        #expect(frozenPayload.frozenRecords.isEmpty)
+
+        let auditOut = CLIRunner.execute(arguments: [
+            "LaunchLens", "--cli", "audit", "--json", "--ledger-dir", vaultDir.path
+        ])
+        #expect(auditOut.exitCode == 0)
+        let auditReport = try decoder.decode(LedgerIntegrityReport.self, from: Data(auditOut.stdout.utf8))
+        #expect(!auditReport.hasIssues)
+    }
+
+    @Test("M1 CLI freeze, restore, and repair subcommands execute hermetically via injected LaunchctlExecuting")
+    @MainActor
+    func testM1CLIFreezeRestoreAndRepairHermetic() throws {
+        final class FakeCLILaunchctl: LaunchctlExecuting, @unchecked Sendable {
+            var loaded: Set<String> = ["io.cli.agent"]
+            var calls: [[String]] = []
+            func runLaunchctl(_ arguments: [String]) -> LaunchctlResult {
+                calls.append(arguments)
+                switch arguments.first {
+                case "print":
+                    let target = arguments.count > 1 ? arguments[1] : ""
+                    let label = target.split(separator: "/").last.map(String.init) ?? ""
+                    return loaded.contains(label)
+                        ? LaunchctlResult(exitCode: 0, stdout: "running")
+                        : LaunchctlResult(exitCode: 113, stderr: "not found")
+                case "bootout":
+                    loaded.remove("io.cli.agent")
+                    return LaunchctlResult(exitCode: 0)
+                case "bootstrap":
+                    loaded.insert("io.cli.agent")
+                    return LaunchctlResult(exitCode: 0)
+                default:
+                    return LaunchctlResult(exitCode: 2)
+                }
+            }
+        }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensCLIFreeze-\(UUID().uuidString)")
+        let vaultDir = tempRoot.appendingPathComponent("Vault")
+        let agentsDir = tempRoot.appendingPathComponent("LaunchAgents")
+        try fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let plistURL = agentsDir.appendingPathComponent("io.cli.agent.plist")
+        let plistBytes = Data("""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>io.cli.agent</string>
+            <key>ProgramArguments</key>
+            <array><string>/bin/sleep</string><string>60</string></array>
+        </dict>
+        </plist>
+        """.utf8)
+        try plistBytes.write(to: plistURL, options: .atomic)
+
+        let fake = FakeCLILaunchctl()
+
+        let missingTarget = CLIRunner.execute(
+            arguments: ["LaunchLens", "--cli", "freeze", "--lang", "en"],
+            launchctlExecutor: fake
+        )
+        #expect(missingTarget.exitCode == 2)
+        #expect(missingTarget.stderr.contains("requires a target service label"))
+
+        let extraTarget = CLIRunner.execute(
+            arguments: ["LaunchLens", "--cli", "freeze", "io.cli.agent", "extra", "--lang", "zh"],
+            launchctlExecutor: fake
+        )
+        #expect(extraTarget.exitCode == 2)
+        #expect(extraTarget.stderr.contains("多余的位置参数"))
+
+        let freezeRes = CLIRunner.execute(
+            arguments: ["LaunchLens", "--cli", "freeze", "io.cli.agent", "--confirm", "--json", "--agents-dir", agentsDir.path, "--ledger-dir", vaultDir.path, "--lang", "en"],
+            launchctlExecutor: fake
+        )
+        #expect(freezeRes.exitCode == 0)
+        #expect(!fm.fileExists(atPath: plistURL.path))
+        #expect(!fake.loaded.contains("io.cli.agent"))
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let frozenRec = try decoder.decode(FreezeSnapshotRecord.self, from: Data(freezeRes.stdout.utf8))
+        #expect(frozenRec.label == "io.cli.agent")
+        #expect(frozenRec.status == .frozen)
+
+        let restoreRes = CLIRunner.execute(
+            arguments: ["LaunchLens", "--cli", "restore", "io.cli.agent", "--confirm", "--agents-dir", agentsDir.path, "--ledger-dir", vaultDir.path, "--lang", "zh"],
+            launchctlExecutor: fake
+        )
+        #expect(restoreRes.exitCode == 0)
+        #expect(restoreRes.stdout.contains("已恢复「io.cli.agent」"))
+        #expect(fm.fileExists(atPath: plistURL.path))
+        #expect(try Data(contentsOf: plistURL) == plistBytes)
+        #expect(fake.loaded.contains("io.cli.agent"))
+
+        let repairRes = CLIRunner.execute(
+            arguments: ["LaunchLens", "--cli", "repair", "--confirm", "--json", "--agents-dir", agentsDir.path, "--ledger-dir", vaultDir.path, "--lang", "en"],
+            launchctlExecutor: fake
+        )
+        #expect(repairRes.exitCode == 0)
+        let summary = try decoder.decode(LedgerRecoverySummary.self, from: Data(repairRes.stdout.utf8))
+        #expect(summary.recoveredInProgressLabels.isEmpty)
+        #expect(summary.adoptedOrphanLabels.isEmpty)
+        #expect(summary.cleanedDuplicatePaths.isEmpty)
+    }
+
+    @Test("LR4: CLI write subcommands (freeze, restore, repair) require --confirm and preview exact launchctl commands without mutating state")
+    @MainActor
+    func testLR4WriteSubcommandsRequireConfirmGateAndShowCommandPreview() throws {
+        final class FakeCLILaunchctl: LaunchctlExecuting, @unchecked Sendable {
+            var loaded: Set<String> = ["io.cli.lr4"]
+            var calls: [[String]] = []
+            func runLaunchctl(_ arguments: [String]) -> LaunchctlResult {
+                calls.append(arguments)
+                switch arguments.first {
+                case "print":
+                    let target = arguments.count > 1 ? arguments[1] : ""
+                    let label = target.split(separator: "/").last.map(String.init) ?? ""
+                    return loaded.contains(label)
+                        ? LaunchctlResult(exitCode: 0, stdout: "running")
+                        : LaunchctlResult(exitCode: 113, stderr: "not found")
+                case "bootout":
+                    loaded.remove("io.cli.lr4")
+                    return LaunchctlResult(exitCode: 0)
+                case "bootstrap":
+                    loaded.insert("io.cli.lr4")
+                    return LaunchctlResult(exitCode: 0)
+                default:
+                    return LaunchctlResult(exitCode: 2)
+                }
+            }
+        }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensCLILR4-\(UUID().uuidString)")
+        let vaultDir = tempRoot.appendingPathComponent("Vault")
+        let agentsDir = tempRoot.appendingPathComponent("LaunchAgents")
+        try fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let plistURL = agentsDir.appendingPathComponent("io.cli.lr4.plist")
+        let plistBytes = Data("""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0">
+        <dict>
+            <key>Label</key>
+            <string>io.cli.lr4</string>
+            <key>ProgramArguments</key>
+            <array><string>/bin/sleep</string><string>60</string></array>
+        </dict>
+        </plist>
+        """.utf8)
+        try plistBytes.write(to: plistURL, options: .atomic)
+
+        let fake = FakeCLILaunchctl()
+
+        // 1. freeze without --confirm -> exitCode 2, previews exact bootout command, zero mutations
+        for (lang, expectedHint) in [("en", "Confirmation required"), ("zh", "需要显式确认")] {
+            let unconfirmedFreeze = CLIRunner.execute(
+                arguments: ["LaunchLens", "--cli", "freeze", "io.cli.lr4", "--agents-dir", agentsDir.path, "--ledger-dir", vaultDir.path, "--lang", lang],
+                launchctlExecutor: fake
+            )
+            #expect(unconfirmedFreeze.exitCode == 2)
+            #expect(unconfirmedFreeze.stdout.isEmpty)
+            #expect(unconfirmedFreeze.stderr.contains(expectedHint))
+            #expect(unconfirmedFreeze.stderr.contains("/bin/launchctl bootout gui/"))
+            #expect(unconfirmedFreeze.stderr.contains(plistURL.path))
+            #expect(unconfirmedFreeze.stderr.contains("--confirm"))
+            #expect(fake.calls.isEmpty)
+            #expect(fm.fileExists(atPath: plistURL.path))
+            #expect(!fm.fileExists(atPath: vaultDir.path))
+        }
+
+        // freeze with --confirm -> executes
+        let confirmedFreeze = CLIRunner.execute(
+            arguments: ["LaunchLens", "--cli", "freeze", "io.cli.lr4", "--confirm", "--agents-dir", agentsDir.path, "--ledger-dir", vaultDir.path, "--lang", "en"],
+            launchctlExecutor: fake
+        )
+        #expect(confirmedFreeze.exitCode == 0)
+        #expect(!fm.fileExists(atPath: plistURL.path))
+        #expect(fake.calls.count == 1)
+
+        // 2. restore without --confirm -> exitCode 2, previews exact bootstrap command, zero mutations
+        for (lang, expectedHint) in [("en", "Confirmation required"), ("zh", "需要显式确认")] {
+            let unconfirmedRestore = CLIRunner.execute(
+                arguments: ["LaunchLens", "--cli", "restore", "io.cli.lr4", "--agents-dir", agentsDir.path, "--ledger-dir", vaultDir.path, "--lang", lang],
+                launchctlExecutor: fake
+            )
+            #expect(unconfirmedRestore.exitCode == 2)
+            #expect(unconfirmedRestore.stdout.isEmpty)
+            #expect(unconfirmedRestore.stderr.contains(expectedHint))
+            #expect(unconfirmedRestore.stderr.contains("/bin/launchctl bootstrap gui/"))
+            #expect(unconfirmedRestore.stderr.contains("--confirm"))
+            #expect(fake.calls.count == 1)
+            #expect(!fm.fileExists(atPath: plistURL.path))
+        }
+
+        // restore with --confirm -> executes
+        let confirmedRestore = CLIRunner.execute(
+            arguments: ["LaunchLens", "--cli", "restore", "io.cli.lr4", "--confirm", "--agents-dir", agentsDir.path, "--ledger-dir", vaultDir.path, "--lang", "zh"],
+            launchctlExecutor: fake
+        )
+        #expect(confirmedRestore.exitCode == 0)
+        #expect(fm.fileExists(atPath: plistURL.path))
+        #expect(try Data(contentsOf: plistURL) == plistBytes)
+        #expect(fake.calls.count == 2)
+
+        // 3. repair without --confirm -> exitCode 2, previews repair target paths, zero mutations
+        let orphanSnapURL = vaultDir.appendingPathComponent("Snapshots/io.cli.orphan-lr4.plist")
+        try Data("""
+        <?xml version="1.0" encoding="UTF-8"?>
+        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+        <plist version="1.0"><dict><key>Label</key><string>io.cli.orphan-lr4</string></dict></plist>
+        """.utf8).write(to: orphanSnapURL, options: .atomic)
+
+        for (lang, expectedHint) in [("en", "Confirmation required"), ("zh", "需要显式确认")] {
+            let unconfirmedRepair = CLIRunner.execute(
+                arguments: ["LaunchLens", "--cli", "repair", "--agents-dir", agentsDir.path, "--ledger-dir", vaultDir.path, "--lang", lang],
+                launchctlExecutor: fake
+            )
+            #expect(unconfirmedRepair.exitCode == 2)
+            #expect(unconfirmedRepair.stdout.isEmpty)
+            #expect(unconfirmedRepair.stderr.contains(expectedHint))
+            #expect(unconfirmedRepair.stderr.contains("--confirm"))
+            #expect(fake.calls.count == 2)
+        }
+        let preRepairStore = FreezeLedgerStore(vaultDirectory: vaultDir, userLaunchAgentsDirectory: agentsDir, launchctlExecutor: fake)
+        #expect(preRepairStore.loadFrozenRecords().isEmpty)
+
+        // repair with --confirm -> executes and adopts orphan backup
+        let confirmedRepair = CLIRunner.execute(
+            arguments: ["LaunchLens", "--cli", "repair", "--confirm", "--agents-dir", agentsDir.path, "--ledger-dir", vaultDir.path, "--lang", "en"],
+            launchctlExecutor: fake
+        )
+        #expect(confirmedRepair.exitCode == 0)
+        #expect(preRepairStore.loadFrozenRecords().map(\.label) == ["io.cli.orphan-lr4"])
+
+        // 4. --confirm on read-only subcommands is rejected with exitCode 2
+        let readOnlyConfirm = CLIRunner.execute(
+            arguments: ["LaunchLens", "--cli", "list", "--confirm", "--agents-dir", agentsDir.path, "--ledger-dir", vaultDir.path, "--lang", "en"]
+        )
+        #expect(readOnlyConfirm.exitCode == 2)
+    }
 }
 
 private final class BundleToken {}

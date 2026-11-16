@@ -1182,4 +1182,463 @@ struct FreezeLedgerTests {
         #expect(!fm.fileExists(atPath: snapURL.path))
         #expect(store.loadRecords().isEmpty)
     }
+
+    @Test("L20: Mid-freeze step injection crash at every FreezeStep recovers service, plist bytes, ledger, and vault cleanly")
+    func testL20MidFreezeStepInjectionCrashAndRecoveryAtEveryStep() throws {
+        struct SimulatedCrashError: Error, Equatable {
+            let step: FreezeStep
+        }
+
+        final class StatefulLaunchctlFake: LaunchctlExecuting, @unchecked Sendable {
+            var loadedLabels: Set<String>
+            var calls: [[String]] = []
+
+            init(initiallyLoaded: Set<String>) {
+                self.loadedLabels = initiallyLoaded
+            }
+
+            private func extractLabel(fromPlistPath path: String) -> String {
+                if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                   let raw = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil),
+                   let dict = raw as? [String: Any],
+                   let label = dict["Label"] as? String {
+                    return label
+                }
+                return URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent
+            }
+
+            func runLaunchctl(_ arguments: [String]) -> LaunchctlResult {
+                calls.append(arguments)
+                guard let sub = arguments.first else {
+                    return LaunchctlResult(exitCode: 2, stderr: "missing subcommand")
+                }
+                switch sub {
+                case "print":
+                    guard arguments.count >= 2,
+                          let slashIdx = arguments[1].lastIndex(of: "/") else {
+                        return LaunchctlResult(exitCode: 2, stderr: "bad target")
+                    }
+                    let label = String(arguments[1][arguments[1].index(after: slashIdx)...])
+                    if loadedLabels.contains(label) {
+                        return LaunchctlResult(exitCode: 0, stdout: "gui/501/\(label) = { state = running }")
+                    }
+                    return LaunchctlResult(exitCode: 113, stderr: "Could not find service \"\(label)\" in domain for user gui: 501")
+                case "bootout":
+                    guard arguments.count >= 3 else {
+                        return LaunchctlResult(exitCode: 2, stderr: "missing bootout path")
+                    }
+                    let label = extractLabel(fromPlistPath: arguments[2])
+                    guard loadedLabels.contains(label) else {
+                        return LaunchctlResult(exitCode: 3, stderr: "Boot-out failed: 3: No such process")
+                    }
+                    loadedLabels.remove(label)
+                    return LaunchctlResult(exitCode: 0)
+                case "bootstrap":
+                    guard arguments.count >= 3 else {
+                        return LaunchctlResult(exitCode: 2, stderr: "missing bootstrap path")
+                    }
+                    let label = extractLabel(fromPlistPath: arguments[2])
+                    guard !loadedLabels.contains(label) else {
+                        return LaunchctlResult(exitCode: 37, stderr: "Bootstrap failed: 37: Operation already in progress")
+                    }
+                    loadedLabels.insert(label)
+                    return LaunchctlResult(exitCode: 0)
+                default:
+                    return LaunchctlResult(exitCode: 2, stderr: "unsupported subcommand \(sub)")
+                }
+            }
+        }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensL20Steps-\(UUID().uuidString)")
+        try fm.createDirectory(at: tempRoot, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        #expect(FreezeStep.allCases == [
+            .afterWriteBackup,
+            .afterWriteInProgress,
+            .afterBootout,
+            .afterRemoveOriginalPlist,
+            .afterWriteFrozen
+        ])
+
+        for (index, targetStep) in FreezeStep.allCases.enumerated() {
+            let caseDir = tempRoot.appendingPathComponent("step-\(targetStep.rawValue)")
+            let agentsDir = caseDir.appendingPathComponent("Library/LaunchAgents")
+            let vaultDir = caseDir.appendingPathComponent("Vault")
+            try fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+
+            let label = "io.test.l20.\(targetStep.rawValue)"
+            let plistURL = agentsDir.appendingPathComponent("\(label).plist")
+            let originalBytes = samplePlistData(label: label, program: "/opt/l20/\(targetStep.rawValue)")
+            try originalBytes.write(to: plistURL, options: .atomic)
+
+            let fakeLaunchctl = StatefulLaunchctlFake(initiallyLoaded: [label])
+            let useInitializerHook = (index % 2 == 0)
+            var initHook: (@Sendable (FreezeStep) throws -> Void)? = nil
+            var callHook: ((FreezeStep) throws -> Void)? = nil
+            if useInitializerHook {
+                initHook = { step in
+                    if step == targetStep {
+                        throw SimulatedCrashError(step: step)
+                    }
+                }
+            } else {
+                callHook = { step in
+                    if step == targetStep {
+                        throw SimulatedCrashError(step: step)
+                    }
+                }
+            }
+            let store = FreezeLedgerStore(
+                vaultDirectory: vaultDir,
+                userLaunchAgentsDirectory: agentsDir,
+                uid: 501,
+                launchctlExecutor: fakeLaunchctl,
+                stepHook: initHook
+            )
+
+            let item = LaunchItem(
+                id: "user::\(label)",
+                label: label,
+                domain: .userAgent,
+                plistPath: plistURL.path,
+                programCommand: "/opt/l20/\(targetStep.rawValue)",
+                pid: 4200 + index,
+                rssBytes: 16 * 1024 * 1024
+            )
+
+            var caughtCrash: SimulatedCrashError?
+            do {
+                try store.freeze(item: item, afterStep: callHook)
+            } catch let crash as SimulatedCrashError {
+                caughtCrash = crash
+            }
+            #expect(caughtCrash == SimulatedCrashError(step: targetStep), "Expected simulated crash at \(targetStep)")
+
+            // Audit must detect the interrupted artifact at every single step before recovery
+            let preRecoveryAudit = store.auditInterruptedTransactionsAndOrphanBackups()
+            #expect(preRecoveryAudit.hasIssues, "Expected audit issues right after crash at \(targetStep)")
+
+            // Now run startup recovery against the same stateful launchctl domain
+            let recoveryStore = FreezeLedgerStore(
+                vaultDirectory: vaultDir,
+                userLaunchAgentsDirectory: agentsDir,
+                uid: 501,
+                launchctlExecutor: fakeLaunchctl
+            )
+            let summary = try recoveryStore.recoverInterruptedAndOrphanBackups()
+
+            switch targetStep {
+            case .afterWriteBackup, .afterWriteInProgress, .afterBootout, .afterRemoveOriginalPlist:
+                // Service must be running/loaded, original plist intact & byte-equal, ledger & vault clean
+                #expect(fakeLaunchctl.loadedLabels.contains(label), "Service must be loaded after recovering \(targetStep)")
+                #expect(fm.fileExists(atPath: plistURL.path), "Original plist must exist after recovering \(targetStep)")
+                #expect(try Data(contentsOf: plistURL) == originalBytes)
+                #expect(recoveryStore.loadRecords().isEmpty, "Ledger must be empty after recovering \(targetStep)")
+                let snapLeftovers = ((try? fm.contentsOfDirectory(atPath: recoveryStore.snapshotsDirectory.path)) ?? []).filter { $0.hasSuffix(".plist") }
+                let stagedLeftovers = ((try? fm.contentsOfDirectory(atPath: recoveryStore.stagingDirectory.path)) ?? []).filter { $0.hasSuffix(".plist") }
+                #expect(snapLeftovers.isEmpty, "Snapshots/ must have zero leftover plists for \(targetStep)")
+                #expect(stagedLeftovers.isEmpty, "Staged/ must have zero leftover plists for \(targetStep)")
+                #expect(!recoveryStore.auditInterruptedTransactionsAndOrphanBackups().hasIssues)
+                if targetStep == .afterWriteBackup {
+                    #expect(summary.cleanedDuplicatePaths.count == 1)
+                    #expect(summary.adoptedOrphanLabels.isEmpty)
+                } else {
+                    #expect(summary.recoveredInProgressLabels == [label])
+                }
+
+            case .afterWriteFrozen:
+                // Commit already succeeded before crash; recovery cleans leftover staged duplicate and keeps service frozen
+                #expect(!fakeLaunchctl.loadedLabels.contains(label), "Committed freeze must remain unloaded after \(targetStep)")
+                #expect(!fm.fileExists(atPath: plistURL.path))
+                #expect(summary.cleanedDuplicatePaths.count == 1)
+                let records = recoveryStore.loadRecords()
+                #expect(records.count == 1)
+                let frozenRec = try #require(records.first)
+                #expect(frozenRec.status == .frozen)
+                #expect(try Data(contentsOf: URL(fileURLWithPath: frozenRec.snapshotFilePath)) == originalBytes)
+                let stagedLeftovers = ((try? fm.contentsOfDirectory(atPath: recoveryStore.stagingDirectory.path)) ?? []).filter { $0.hasSuffix(".plist") }
+                #expect(stagedLeftovers.isEmpty)
+                #expect(!recoveryStore.auditInterruptedTransactionsAndOrphanBackups().hasIssues)
+
+                // Subsequent restore brings service & plist back byte-identically
+                try recoveryStore.restore(recordID: frozenRec.id)
+                #expect(fakeLaunchctl.loadedLabels.contains(label))
+                #expect(try Data(contentsOf: plistURL) == originalBytes)
+                #expect(recoveryStore.loadRecords().isEmpty)
+            }
+        }
+    }
+
+    @Test("L20 Preflight A: Non-existent vault under read-only 0555 ancestor fails in Step 1 preflight with ledgerWriteFailed")
+    func testL20PreflightAncestorDirectoryWritability() throws {
+        func mtimePair(_ url: URL) throws -> [Int] {
+            var st = stat()
+            try #require(lstat(url.path, &st) == 0)
+            return [st.st_mtimespec.tv_sec, st.st_mtimespec.tv_nsec]
+        }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensL20Anc-\(UUID().uuidString)")
+        let agentsDir = tempRoot.appendingPathComponent("Library/LaunchAgents")
+        let readOnlyAncestor = tempRoot.appendingPathComponent("ReadOnlyParent")
+        // Vault is nested 2 levels deeper and does NOT exist on disk yet
+        let nonExistentVaultDir = readOnlyAncestor
+            .appendingPathComponent("ApplicationSupport")
+            .appendingPathComponent("LaunchLens")
+        try fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: readOnlyAncestor, withIntermediateDirectories: true)
+        defer {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: readOnlyAncestor.path)
+            try? fm.removeItem(at: tempRoot)
+        }
+
+        let plistURL = agentsDir.appendingPathComponent("io.test.l20ancestor.plist")
+        let originalBytes = samplePlistData(label: "io.test.l20ancestor")
+        try originalBytes.write(to: plistURL, options: .atomic)
+
+        let sentinelDate = Date(timeIntervalSince1970: 1_700_100_000)
+        try fm.setAttributes([.modificationDate: sentinelDate], ofItemAtPath: readOnlyAncestor.path)
+        try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: readOnlyAncestor.path)
+        let ancestorMtimeBefore = try mtimePair(readOnlyAncestor)
+
+        let mock = ProgrammableLaunchctlMock()
+        let store = FreezeLedgerStore(
+            vaultDirectory: nonExistentVaultDir,
+            userLaunchAgentsDirectory: agentsDir,
+            uid: 501,
+            launchctlExecutor: mock
+        )
+        let item = LaunchItem(
+            id: "user::io.test.l20ancestor",
+            label: "io.test.l20ancestor",
+            domain: .userAgent,
+            plistPath: plistURL.path,
+            programCommand: "/usr/bin/true"
+        )
+
+        var caught: FreezeError?
+        do {
+            try store.freeze(item: item)
+        } catch let err as FreezeError {
+            caught = err
+        }
+        let err = try #require(caught)
+        if case let .ledgerWriteFailed(step, _, _, _) = err {
+            #expect(step.contains("Step 1/6"))
+        } else {
+            Issue.record("Expected Step 1/6 FreezeError.ledgerWriteFailed from ancestor writability check, got \(err)")
+        }
+        #expect(!fm.fileExists(atPath: nonExistentVaultDir.path))
+        #expect(try mtimePair(readOnlyAncestor) == ancestorMtimeBefore)
+        #expect(mock.calls.isEmpty)
+        #expect(try Data(contentsOf: plistURL) == originalBytes)
+    }
+
+    @Test("L20 Preflight B: Writable 0755 vault with read-only 0555 Snapshots or Staged subdirectory fails in Step 1 before any write or bootout")
+    func testL20PreflightSubdirectoryWritability() throws {
+        func mtimePair(_ url: URL) throws -> [Int] {
+            var st = stat()
+            try #require(lstat(url.path, &st) == 0)
+            return [st.st_mtimespec.tv_sec, st.st_mtimespec.tv_nsec]
+        }
+
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensL20Sub-\(UUID().uuidString)")
+        let agentsDir = tempRoot.appendingPathComponent("Library/LaunchAgents")
+        try fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+
+        // Case 1: vaultDir (0755) & Snapshots (0755) writable, Staged (0555) read-only.
+        // Without subdirectory preflight, freeze would write backup + ledger and run launchctl bootout before failing in Step 5!
+        let vaultStagedRO = tempRoot.appendingPathComponent("VaultStagedRO")
+        let snaps1 = vaultStagedRO.appendingPathComponent("Snapshots")
+        let staged1 = vaultStagedRO.appendingPathComponent("Staged")
+        try fm.createDirectory(at: snaps1, withIntermediateDirectories: true)
+        try fm.createDirectory(at: staged1, withIntermediateDirectories: true)
+
+        // Case 2: vaultDir (0755) & Staged (0755) writable, Snapshots (0555) read-only.
+        let vaultSnapsRO = tempRoot.appendingPathComponent("VaultSnapsRO")
+        let snaps2 = vaultSnapsRO.appendingPathComponent("Snapshots")
+        let staged2 = vaultSnapsRO.appendingPathComponent("Staged")
+        try fm.createDirectory(at: snaps2, withIntermediateDirectories: true)
+        try fm.createDirectory(at: staged2, withIntermediateDirectories: true)
+
+        defer {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: staged1.path)
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: snaps2.path)
+            try? fm.removeItem(at: tempRoot)
+        }
+
+        let sentinelDate = Date(timeIntervalSince1970: 1_700_200_000)
+        for dir in [vaultStagedRO, snaps1, staged1, vaultSnapsRO, snaps2, staged2] {
+            try fm.setAttributes([.modificationDate: sentinelDate], ofItemAtPath: dir.path)
+        }
+        try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: staged1.path)
+        try fm.setAttributes([.posixPermissions: 0o555], ofItemAtPath: snaps2.path)
+
+        // Verify Case 1 (Staged = 0555)
+        do {
+            let plistURL = agentsDir.appendingPathComponent("io.test.l20stagedro.plist")
+            let originalBytes = samplePlistData(label: "io.test.l20stagedro")
+            try originalBytes.write(to: plistURL, options: .atomic)
+            let snaps1Mtime = try mtimePair(snaps1)
+            let vault1Mtime = try mtimePair(vaultStagedRO)
+
+            let mock = ProgrammableLaunchctlMock()
+            let store = FreezeLedgerStore(
+                vaultDirectory: vaultStagedRO,
+                userLaunchAgentsDirectory: agentsDir,
+                uid: 501,
+                launchctlExecutor: mock
+            )
+            let item = LaunchItem(
+                id: "user::io.test.l20stagedro",
+                label: "io.test.l20stagedro",
+                domain: .userAgent,
+                plistPath: plistURL.path,
+                programCommand: "/usr/bin/true"
+            )
+            var caught: FreezeError?
+            do {
+                try store.freeze(item: item)
+            } catch let err as FreezeError {
+                caught = err
+            }
+            let err = try #require(caught)
+            if case let .ledgerWriteFailed(step, _, _, _) = err {
+                #expect(step.contains("Step 1/6"))
+            } else {
+                Issue.record("Expected Step 1/6 FreezeError.ledgerWriteFailed when Staged/ is 0555, got \(err)")
+            }
+            #expect(mock.calls.isEmpty, "Must NOT invoke launchctl bootout when Staged/ is read-only")
+            #expect(((try? fm.contentsOfDirectory(atPath: snaps1.path)) ?? []).isEmpty)
+            #expect(!fm.fileExists(atPath: store.ledgerFileURL.path))
+            #expect(try mtimePair(snaps1) == snaps1Mtime)
+            #expect(try mtimePair(vaultStagedRO) == vault1Mtime)
+            #expect(try Data(contentsOf: plistURL) == originalBytes)
+        }
+
+        // Verify Case 2 (Snapshots = 0555)
+        do {
+            let plistURL = agentsDir.appendingPathComponent("io.test.l20snapsro.plist")
+            let originalBytes = samplePlistData(label: "io.test.l20snapsro")
+            try originalBytes.write(to: plistURL, options: .atomic)
+            let staged2Mtime = try mtimePair(staged2)
+            let vault2Mtime = try mtimePair(vaultSnapsRO)
+
+            let mock = ProgrammableLaunchctlMock()
+            let store = FreezeLedgerStore(
+                vaultDirectory: vaultSnapsRO,
+                userLaunchAgentsDirectory: agentsDir,
+                uid: 501,
+                launchctlExecutor: mock
+            )
+            let item = LaunchItem(
+                id: "user::io.test.l20snapsro",
+                label: "io.test.l20snapsro",
+                domain: .userAgent,
+                plistPath: plistURL.path,
+                programCommand: "/usr/bin/true"
+            )
+            var caught: FreezeError?
+            do {
+                try store.freeze(item: item)
+            } catch let err as FreezeError {
+                caught = err
+            }
+            let err = try #require(caught)
+            if case let .ledgerWriteFailed(step, _, _, _) = err {
+                #expect(step.contains("Step 1/6"))
+            } else {
+                Issue.record("Expected Step 1/6 FreezeError.ledgerWriteFailed when Snapshots/ is 0555, got \(err)")
+            }
+            #expect(mock.calls.isEmpty)
+            #expect(!fm.fileExists(atPath: store.ledgerFileURL.path))
+            #expect(try mtimePair(staged2) == staged2Mtime)
+            #expect(try mtimePair(vaultSnapsRO) == vault2Mtime)
+            #expect(try Data(contentsOf: plistURL) == originalBytes)
+        }
+    }
+
+    @Test("L20 Print Error: Unexpected launchctl print failure (exit != 0 and != 113) surfaces diagnostic without bootstrapping or corrupting state")
+    @MainActor
+    func testL20UnexpectedLaunchctlPrintFailurePreservesStateWithoutBootstrapping() throws {
+        let fm = FileManager.default
+        let tempRoot = fm.temporaryDirectory.appendingPathComponent("LaunchLensL20PrintErr-\(UUID().uuidString)")
+        let agentsDir = tempRoot.appendingPathComponent("Library/LaunchAgents")
+        let vaultDir = tempRoot.appendingPathComponent("Vault")
+        try fm.createDirectory(at: agentsDir, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: tempRoot) }
+
+        let label = "io.test.l20printerr"
+        let plistURL = agentsDir.appendingPathComponent("\(label).plist")
+        let originalBytes = samplePlistData(label: label, program: "/opt/l20/printerr")
+        try originalBytes.write(to: plistURL, options: .atomic)
+        let canonicalPlistPath = plistURL.resolvingSymlinksInPath().standardizedFileURL.path
+
+        let mock = ProgrammableLaunchctlMock()
+        mock.printResult = LaunchctlResult(exitCode: 1, stderr: "Domain does not support specified action")
+        mock.bootstrapResult = LaunchctlResult(exitCode: 0)
+
+        let store = FreezeLedgerStore(
+            vaultDirectory: vaultDir,
+            userLaunchAgentsDirectory: agentsDir,
+            uid: 501,
+            launchctlExecutor: mock
+        )
+        try fm.createDirectory(at: store.snapshotsDirectory, withIntermediateDirectories: true)
+        let snapURL = store.snapshotsDirectory.appendingPathComponent("\(label)-txprint.plist")
+        try originalBytes.write(to: snapURL, options: .atomic)
+
+        let inProgressRec = FreezeSnapshotRecord(
+            id: "txprint",
+            label: label,
+            originalPlistPath: canonicalPlistPath,
+            snapshotFilePath: snapURL.path,
+            stagedPlistPath: nil,
+            sha256Hex: FreezeLedgerStore.sha256Hex(originalBytes),
+            frozenAt: Date(),
+            rssBytesAtFreeze: 0,
+            status: .inProgress
+        )
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode([inProgressRec]).write(to: store.ledgerFileURL, options: .atomic)
+
+        for unexpectedCode in [Int32(1), Int32(127)] {
+            mock.calls.removeAll()
+            mock.printResult = LaunchctlResult(
+                exitCode: unexpectedCode,
+                stderr: unexpectedCode == 127 ? "exec /bin/launchctl failed" : "Domain error"
+            )
+
+            var caught: FreezeError?
+            do {
+                _ = try store.recoverInterruptedAndOrphanBackups()
+            } catch let err as FreezeError {
+                caught = err
+            }
+            let err = try #require(caught, "Expected recoveryPrintFailed for exit code \(unexpectedCode)")
+            if case let .recoveryPrintFailed(errLabel, exitCode, _, _, _) = err {
+                #expect(errLabel == label)
+                #expect(exitCode == unexpectedCode)
+            } else {
+                Issue.record("Expected FreezeError.recoveryPrintFailed, got \(err)")
+            }
+
+            let enMsg = err.localizedMessage(AppLocalizer(fixedLanguage: .en))
+            let zhMsg = err.localizedMessage(AppLocalizer(fixedLanguage: .zhHans))
+            #expect(enMsg.contains("exit code \(unexpectedCode)"))
+            #expect(zhMsg.contains("退出码 \(unexpectedCode)"))
+
+            // Must ONLY have called print — NEVER bootstrap! And on-disk state must remain intact.
+            #expect(mock.calls == [["print", "gui/501/\(label)"]])
+            #expect(fm.fileExists(atPath: canonicalPlistPath))
+            #expect(try Data(contentsOf: URL(fileURLWithPath: canonicalPlistPath)) == originalBytes)
+            #expect(fm.fileExists(atPath: snapURL.path))
+            #expect(store.loadRecords().count == 1)
+            #expect(store.loadRecords().first?.status == .inProgress)
+        }
+    }
 }

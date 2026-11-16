@@ -127,6 +127,8 @@ def expected_assertion_for(cmd: str):
         return ("exact_all", ["Test run with", "passed"])
     if cmd == "./Scripts/build-app.sh":
         return ("exact_all", ["✓ Built ", "build/LaunchLens.app"])
+    if "--cli list" in cmd and "--json" in cmd and "--agents-dir" in cmd:
+        return ("exact_all", ['"services"', '"io.fixture.readme-agent"', '"totalBackgroundRSSBytes"'])
     if "--cli list" in cmd and "--agents-dir" in cmd and "--lang en" in cmd:
         return ("exact_all", ["Total Non-Apple Background RSS", "io.fixture.readme-agent", "[User agent]"])
     if "--cli list" in cmd and "--agents-dir" in cmd and "--lang zh" in cmd:
@@ -254,6 +256,11 @@ text = re.sub(r"/private/var/folders/[^\s\"')]+", "<TMPDIR>", text)
 text = re.sub(r"/var/folders/[^\s\"')]+", "<TMPDIR>", text)
 text = re.sub(r"/private/tmp/[^\s\"')]+", "<TMP>", text)
 text = re.sub(r"/tmp/[^\s\"')]+", "<TMP>", text)
+text = re.sub(
+    r"(PID \d+\s+(?:\[(?:Orphan daemon|孤儿进程)\]\s+)?[A-Za-z0-9._+-]+\s*/\s*)([^\s(]+)",
+    r"\1<SCRUBBED_TARGET>",
+    text,
+)
 
 out_path.write_text(text, encoding="utf-8")
 PYEOF
