@@ -51,7 +51,7 @@ Verified read-only on an Apple Silicon Mac (`2026-11-15`, zero private service l
 
 ## Install & Build (macOS 14.0+, Apple Silicon)
 
-### Homebrew Cask (`v0.3.0`, published release)
+### Homebrew Cask (`v0.4.0`, published release)
 
 ```bash
 brew install --cask zxu756/tap/launchlens

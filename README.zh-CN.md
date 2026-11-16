@@ -51,7 +51,7 @@
 
 ## 安装与编译（macOS 14.0+，Apple Silicon）
 
-### Homebrew Cask 安装（`v0.3.0`，已发布版本）
+### Homebrew Cask 安装（`v0.4.0`，已发布版本）
 
 ```bash
 brew install --cask zxu756/tap/launchlens
