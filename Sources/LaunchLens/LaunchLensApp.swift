@@ -15,7 +15,7 @@ enum LaunchLensEntrypoint {
             Foundation.exit(code)
         }
 
-        if args.contains("--cli") || args.contains("--help") || args.contains("-h") {
+        if CLIRunner.shouldRouteToCLI(arguments: args) {
             let code = MainActor.assumeIsolated {
                 CLIRunner.run(arguments: args)
             }

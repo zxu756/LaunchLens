@@ -58,7 +58,50 @@ public struct CLIFrozenJSONPayload: Codable, Equatable, Sendable {
     }
 }
 
+public typealias SessionSnapshotCaptureProvider = @Sendable () throws -> SessionSnapshot
+
 public enum CLIRunner {
+
+    private static let directSubcommands: Set<String> = ["snapshot", "diff"]
+
+    public static func shouldRouteToCLI(arguments: [String]) -> Bool {
+        let argsWithoutExe = Array(arguments.dropFirst())
+        if argsWithoutExe.contains("--cli") || argsWithoutExe.contains("--help") || argsWithoutExe.contains("-h") {
+            return true
+        }
+
+        var idx = 0
+        while idx < argsWithoutExe.count {
+            let arg = argsWithoutExe[idx]
+            switch arg {
+            case "--lang":
+                if idx + 1 < argsWithoutExe.count {
+                    let next = argsWithoutExe[idx + 1]
+                    if directSubcommands.contains(next) {
+                        return true
+                    }
+                    if !next.hasPrefix("-") {
+                        idx += 2
+                        continue
+                    }
+                }
+            case "--ledger-dir", "--agents-dir":
+                if idx + 1 < argsWithoutExe.count, !argsWithoutExe[idx + 1].hasPrefix("-") {
+                    let next = argsWithoutExe[idx + 1]
+                    if !directSubcommands.contains(next) {
+                        idx += 2
+                        continue
+                    }
+                }
+            default:
+                if !arg.hasPrefix("-") {
+                    return directSubcommands.contains(arg)
+                }
+            }
+            idx += 1
+        }
+        return false
+    }
 
     @MainActor
     public static func run(arguments: [String], preferredLanguages: [String] = Locale.preferredLanguages) -> Int32 {
@@ -76,7 +119,11 @@ public enum CLIRunner {
     public static func execute(
         arguments: [String],
         preferredLanguages: [String] = Locale.preferredLanguages,
-        launchctlExecutor: (any LaunchctlExecuting)? = nil
+        launchctlExecutor: (any LaunchctlExecuting)? = nil,
+        hostCommandExecutor: (any HostCommandExecuting)? = nil,
+        snapshotPlistDirectories: [(URL, ServiceDomain)]? = nil,
+        snapshotUID: Int? = nil,
+        snapshotCaptureProvider: SessionSnapshotCaptureProvider? = nil
     ) -> CLIExecutionOutput {
         // First pass: resolve language without touching UserDefaults
         var resolvedLang: AppLanguage = {
@@ -99,6 +146,7 @@ public enum CLIRunner {
         var showHelp = false
         var sawCLIFlag = false
         var jsonOutput = false
+        var failOnAdded = false
         var confirmed = false
         var unknownFlags: [String] = []
 
@@ -109,6 +157,8 @@ public enum CLIRunner {
                 sawCLIFlag = true
             case "--json":
                 jsonOutput = true
+            case "--fail-on-added":
+                failOnAdded = true
             case "--confirm":
                 confirmed = true
             case "--help", "-h":
@@ -196,7 +246,8 @@ public enum CLIRunner {
             return CLIExecutionOutput(exitCode: 2, stderr: msg)
         }
 
-        if !sawCLIFlag {
+        let allowsDirectWithoutCLI = subcommands.first.map { directSubcommands.contains($0) } ?? false
+        if !sawCLIFlag && !allowsDirectWithoutCLI {
             let msg = localizer.L(
                 "Error: Missing '--cli' flag.\n\(usageText(localizer))\n",
                 "错误：缺少 --cli 参数。\n\(usageText(localizer))\n"
@@ -205,13 +256,95 @@ public enum CLIRunner {
         }
 
         let subcmd = subcommands.first ?? "list"
-        let supported = ["list", "orphans", "frozen", "audit", "freeze", "restore", "repair"]
+        let supported = ["list", "orphans", "frozen", "audit", "freeze", "restore", "repair", "snapshot", "diff"]
         guard supported.contains(subcmd) else {
             let msg = localizer.L(
-                "Error: Unknown CLI subcommand '\(subcmd)'. Supported subcommands: list, orphans, frozen, audit, freeze, restore, repair.\n",
-                "错误：未知的命令行子命令「\(subcmd)」。支持的子命令：list、orphans、frozen、audit、freeze、restore、repair。\n"
+                "Error: Unknown CLI subcommand '\(subcmd)'. Supported subcommands: list, orphans, frozen, audit, freeze, restore, repair, snapshot, diff.\n",
+                "错误：未知的命令行子命令「\(subcmd)」。支持的子命令：list、orphans、frozen、audit、freeze、restore、repair、snapshot、diff。\n"
             )
             return CLIExecutionOutput(exitCode: 2, stderr: msg)
+        }
+
+        if failOnAdded && subcmd != "diff" {
+            let msg = localizer.L(
+                "Error: '--fail-on-added' is only valid with the 'diff' subcommand.\n\(usageText(localizer))\n",
+                "错误：参数「--fail-on-added」仅适用于 diff 子命令。\n\(usageText(localizer))\n"
+            )
+            return CLIExecutionOutput(exitCode: 2, stderr: msg)
+        }
+
+        if subcmd == "snapshot" {
+            if jsonOutput {
+                let msg = localizer.L(
+                    "Error: '--json' is not supported with 'snapshot' (snapshot always writes JSON to <file>).\n\(usageText(localizer))\n",
+                    "错误：子命令「snapshot」不支持 --json 参数（快照本身即写入 <文件>）。\n\(usageText(localizer))\n"
+                )
+                return CLIExecutionOutput(exitCode: 2, stderr: msg)
+            }
+            if confirmed || ledgerDirPath != nil || agentsDirPath != nil {
+                let msg = localizer.L(
+                    "Error: Unsupported option for 'snapshot'.\n\(usageText(localizer))\n",
+                    "错误：子命令「snapshot」包含不支持的选项。\n\(usageText(localizer))\n"
+                )
+                return CLIExecutionOutput(exitCode: 2, stderr: msg)
+            }
+            if subcommands.count < 2 || subcommands[1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let msg = localizer.L(
+                    "Error: Subcommand 'snapshot' requires an output <file> path.\n\(usageText(localizer))\n",
+                    "错误：子命令「snapshot」需要指定输出 <文件> 路径。\n\(usageText(localizer))\n"
+                )
+                return CLIExecutionOutput(exitCode: 2, stderr: msg)
+            }
+            if subcommands.count > 2 {
+                let extra = subcommands.dropFirst(2).joined(separator: " ")
+                let msg = localizer.L(
+                    "Error: Unexpected extra argument(s): '\(extra)'.\n\(usageText(localizer))\n",
+                    "错误：存在多余的位置参数：「\(extra)」。\n\(usageText(localizer))\n"
+                )
+                return CLIExecutionOutput(exitCode: 2, stderr: msg)
+            }
+            return executeSnapshot(
+                rawOutputPath: subcommands[1],
+                localizer: localizer,
+                hostCommandExecutor: hostCommandExecutor,
+                snapshotPlistDirectories: snapshotPlistDirectories,
+                snapshotUID: snapshotUID,
+                snapshotCaptureProvider: snapshotCaptureProvider
+            )
+        }
+
+        if subcmd == "diff" {
+            if confirmed || ledgerDirPath != nil || agentsDirPath != nil {
+                let msg = localizer.L(
+                    "Error: Unsupported option for 'diff'.\n\(usageText(localizer))\n",
+                    "错误：子命令「diff」包含不支持的选项。\n\(usageText(localizer))\n"
+                )
+                return CLIExecutionOutput(exitCode: 2, stderr: msg)
+            }
+            if subcommands.count < 3
+                || subcommands[1].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || subcommands[2].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                let msg = localizer.L(
+                    "Error: Subcommand 'diff' requires <before> and <after> snapshot file paths.\n\(usageText(localizer))\n",
+                    "错误：子命令「diff」需要指定 <前> 和 <后> 两个快照文件路径。\n\(usageText(localizer))\n"
+                )
+                return CLIExecutionOutput(exitCode: 2, stderr: msg)
+            }
+            if subcommands.count > 3 {
+                let extra = subcommands.dropFirst(3).joined(separator: " ")
+                let msg = localizer.L(
+                    "Error: Unexpected extra argument(s): '\(extra)'.\n\(usageText(localizer))\n",
+                    "错误：存在多余的位置参数：「\(extra)」。\n\(usageText(localizer))\n"
+                )
+                return CLIExecutionOutput(exitCode: 2, stderr: msg)
+            }
+            return executeDiff(
+                rawBeforePath: subcommands[1],
+                rawAfterPath: subcommands[2],
+                jsonOutput: jsonOutput,
+                failOnAdded: failOnAdded,
+                localizer: localizer
+            )
         }
 
         let requiresTargetArg = (subcmd == "freeze" || subcmd == "restore")
@@ -551,6 +684,412 @@ public enum CLIRunner {
         )
     }
 
+    // MARK: - M2 Session Snapshot & Diff Execution
+
+    @MainActor
+    private static func executeSnapshot(
+        rawOutputPath: String,
+        localizer: AppLocalizer,
+        hostCommandExecutor: (any HostCommandExecuting)?,
+        snapshotPlistDirectories: [(URL, ServiceDomain)]?,
+        snapshotUID: Int?,
+        snapshotCaptureProvider: SessionSnapshotCaptureProvider?
+    ) -> CLIExecutionOutput {
+        let targetURL = resolveFilePathURL(rawOutputPath)
+
+        do {
+            try preflightSnapshotTargetWritable(targetURL)
+
+            let snapshot: SessionSnapshot
+            if let snapshotCaptureProvider {
+                snapshot = try snapshotCaptureProvider()
+            } else {
+                snapshot = try LaunchScanner.captureSessionSnapshot(
+                    plistDirectories: snapshotPlistDirectories,
+                    currentUID: snapshotUID ?? Int(getuid()),
+                    executor: hostCommandExecutor ?? SystemHostCommandExecutor()
+                )
+            }
+
+            var payload = try SessionSnapshot.encodePrettyJSON(snapshot)
+            payload.append(Data("\n".utf8))
+            try writeDataAtomicallyWithFsync(payload, to: targetURL)
+
+            let v = localizer.snapshotVocabulary
+            let summary = "\(v.snapshotSavedPrefix) \(targetURL.path) (\(v.servicesHeader): \(snapshot.services.count), \(v.listenersHeader): \(snapshot.listeners.count), \(v.orphansHeader): \(snapshot.orphans.count))\n"
+            return CLIExecutionOutput(exitCode: 0, stdout: summary)
+        } catch let err as SnapshotCaptureError {
+            switch err {
+            case let .commandFailed(executablePath, arguments, exitCode, stderr):
+                let cmd = ([executablePath] + arguments).joined(separator: " ")
+                let detail = stderr.isEmpty ? "" : " (\(singleLine(stderr)))"
+                let msg = localizer.L(
+                    "Error: Snapshot capture failed — command '\(cmd)' exited with code \(exitCode)\(detail).\n",
+                    "错误：快照采集失败——命令「\(cmd)」退出码为 \(exitCode)\(detail)。\n"
+                )
+                return CLIExecutionOutput(exitCode: 1, stderr: msg)
+            }
+        } catch {
+            let reason = singleLine(error.localizedDescription)
+            let msg = localizer.L(
+                "Error: Failed to write snapshot to '\(targetURL.path)': \(reason)\n",
+                "错误：无法写入快照文件「\(targetURL.path)」：\(reason)\n"
+            )
+            return CLIExecutionOutput(exitCode: 1, stderr: msg)
+        }
+    }
+
+    @MainActor
+    private static func executeDiff(
+        rawBeforePath: String,
+        rawAfterPath: String,
+        jsonOutput: Bool,
+        failOnAdded: Bool,
+        localizer: AppLocalizer
+    ) -> CLIExecutionOutput {
+        let beforeURL = resolveFilePathURL(rawBeforePath)
+        let afterURL = resolveFilePathURL(rawAfterPath)
+
+        let beforeSnap: SessionSnapshot
+        switch loadAndValidateSnapshotFile(at: beforeURL, localizer: localizer) {
+        case let .success(snap):
+            beforeSnap = snap
+        case let .failure(errOut):
+            return errOut
+        }
+
+        let afterSnap: SessionSnapshot
+        switch loadAndValidateSnapshotFile(at: afterURL, localizer: localizer) {
+        case let .success(snap):
+            afterSnap = snap
+        case let .failure(errOut):
+            return errOut
+        }
+
+        let rawDiff = SessionSnapshotDiffer.diff(before: beforeSnap, after: afterSnap)
+        let safeDiff = redactDiffForOutput(rawDiff)
+        let exitCode: Int32 = (failOnAdded && safeDiff.hasAdditions) ? 3 : 0
+
+        if jsonOutput {
+            do {
+                let data = try SessionSnapshotDiffer.encodePrettyJSON(safeDiff)
+                let text = String(decoding: data, as: UTF8.self) + "\n"
+                return CLIExecutionOutput(exitCode: exitCode, stdout: text)
+            } catch {
+                let reason = singleLine(error.localizedDescription)
+                let msg = localizer.L(
+                    "Error: Failed to encode diff JSON: \(reason)\n",
+                    "错误：无法编码差异 JSON：\(reason)\n"
+                )
+                return CLIExecutionOutput(exitCode: 1, stderr: msg)
+            }
+        }
+
+        let text = formatSnapshotDiffText(safeDiff, vocabulary: localizer.snapshotVocabulary)
+        return CLIExecutionOutput(exitCode: exitCode, stdout: text)
+    }
+
+    private enum SnapshotFileLoadOutcome {
+        case success(SessionSnapshot)
+        case failure(CLIExecutionOutput)
+    }
+
+    @MainActor
+    private static func loadAndValidateSnapshotFile(
+        at fileURL: URL,
+        localizer: AppLocalizer
+    ) -> SnapshotFileLoadOutcome {
+        let fm = FileManager.default
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: fileURL.path, isDirectory: &isDir) else {
+            let msg = localizer.L(
+                "Error: Snapshot file does not exist: '\(fileURL.path)'.\n",
+                "错误：快照文件不存在：「\(fileURL.path)」。\n"
+            )
+            return .failure(CLIExecutionOutput(exitCode: 1, stderr: msg))
+        }
+        if isDir.boolValue {
+            let msg = localizer.L(
+                "Error: Snapshot path is a directory, expected a file: '\(fileURL.path)'.\n",
+                "错误：快照路径是目录而非文件：「\(fileURL.path)」。\n"
+            )
+            return .failure(CLIExecutionOutput(exitCode: 1, stderr: msg))
+        }
+
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let snapshot = try SessionSnapshot.decodeAndValidate(from: data)
+            return .success(snapshot)
+        } catch let err as SnapshotValidationError {
+            switch err {
+            case let .unsupportedSchemaVersion(found, expected):
+                let msg = localizer.L(
+                    "Error: Unsupported snapshot schemaVersion \(found) in '\(fileURL.path)' (expected \(expected)).\n",
+                    "错误：快照文件「\(fileURL.path)」的 schemaVersion 为 \(found)，不受支持（期望为 \(expected)）。\n"
+                )
+                return .failure(CLIExecutionOutput(exitCode: 1, stderr: msg))
+            }
+        } catch {
+            let reason = singleLine(error.localizedDescription)
+            let msg = localizer.L(
+                "Error: Failed to read or parse snapshot file '\(fileURL.path)': \(reason)\n",
+                "错误：无法读取或解析快照文件「\(fileURL.path)」：\(reason)\n"
+            )
+            return .failure(CLIExecutionOutput(exitCode: 1, stderr: msg))
+        }
+    }
+
+    private static func resolveFilePathURL(_ rawPath: String) -> URL {
+        let expanded = (rawPath as NSString).expandingTildeInPath
+        return URL(fileURLWithPath: expanded).standardizedFileURL
+    }
+
+    private static func preflightSnapshotTargetWritable(_ targetURL: URL) throws {
+        let fm = FileManager.default
+        let parentURL = targetURL.deletingLastPathComponent()
+
+        var parentIsDir: ObjCBool = false
+        guard fm.fileExists(atPath: parentURL.path, isDirectory: &parentIsDir), parentIsDir.boolValue else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(ENOENT),
+                userInfo: [NSLocalizedDescriptionKey: "Directory does not exist: \(parentURL.path)"]
+            )
+        }
+        guard fm.isWritableFile(atPath: parentURL.path) else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(EACCES),
+                userInfo: [NSLocalizedDescriptionKey: "Directory is not writable: \(parentURL.path)"]
+            )
+        }
+
+        var targetIsDir: ObjCBool = false
+        if fm.fileExists(atPath: targetURL.path, isDirectory: &targetIsDir) {
+            if targetIsDir.boolValue {
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(EISDIR),
+                    userInfo: [NSLocalizedDescriptionKey: "Target path is a directory: \(targetURL.path)"]
+                )
+            }
+            if !fm.isWritableFile(atPath: targetURL.path) {
+                throw NSError(
+                    domain: NSPOSIXErrorDomain,
+                    code: Int(EACCES),
+                    userInfo: [NSLocalizedDescriptionKey: "Target file is not writable: \(targetURL.path)"]
+                )
+            }
+        }
+    }
+
+    private static func writeDataAtomicallyWithFsync(_ data: Data, to targetURL: URL) throws {
+        try preflightSnapshotTargetWritable(targetURL)
+
+        let parentURL = targetURL.deletingLastPathComponent()
+        let tempName = ".\(targetURL.lastPathComponent).tmp.\(UUID().uuidString)"
+        let tempURL = parentURL.appendingPathComponent(tempName, isDirectory: false)
+        let tempPath = tempURL.path
+
+        let fd = Darwin.open(tempPath, O_WRONLY | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
+        if fd < 0 {
+            let err = errno
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(err),
+                userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(err))]
+            )
+        }
+
+        var fdClosed = false
+        var renamed = false
+        defer {
+            if !fdClosed {
+                _ = Darwin.close(fd)
+            }
+            if !renamed {
+                _ = Darwin.unlink(tempPath)
+            }
+        }
+
+        try data.withUnsafeBytes { rawBuffer in
+            guard let baseAddress = rawBuffer.baseAddress else { return }
+            var totalWritten = 0
+            while totalWritten < rawBuffer.count {
+                let remaining = rawBuffer.count - totalWritten
+                let written = Darwin.write(fd, baseAddress.advanced(by: totalWritten), remaining)
+                if written < 0 {
+                    if errno == EINTR {
+                        continue
+                    }
+                    let err = errno
+                    throw NSError(
+                        domain: NSPOSIXErrorDomain,
+                        code: Int(err),
+                        userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(err))]
+                    )
+                }
+                totalWritten += written
+            }
+        }
+
+        if Darwin.fsync(fd) != 0 {
+            let err = errno
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(err),
+                userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(err))]
+            )
+        }
+
+        if Darwin.close(fd) != 0 {
+            fdClosed = true
+            let err = errno
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(err),
+                userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(err))]
+            )
+        }
+        fdClosed = true
+
+        if Darwin.rename(tempPath, targetURL.path) != 0 {
+            let err = errno
+            throw NSError(
+                domain: NSPOSIXErrorDomain,
+                code: Int(err),
+                userInfo: [NSLocalizedDescriptionKey: String(cString: strerror(err))]
+            )
+        }
+        renamed = true
+    }
+
+    private static func redactDiffForOutput(_ diff: SessionSnapshotDiff) -> SessionSnapshotDiff {
+        var out = diff
+        out.services.added = out.services.added.map(redactServiceEntry)
+        out.services.removed = out.services.removed.map(redactServiceEntry)
+        out.services.modified = out.services.modified.map { mod in
+            var copy = mod
+            copy.before = redactServiceEntry(copy.before)
+            copy.after = redactServiceEntry(copy.after)
+            return copy
+        }
+        out.listeners.added = out.listeners.added.map(redactListenerEntry)
+        out.listeners.removed = out.listeners.removed.map(redactListenerEntry)
+        out.orphans.added = out.orphans.added.map(redactOrphanEntry)
+        out.orphans.removed = out.orphans.removed.map(redactOrphanEntry)
+        return out
+    }
+
+    private static func redactServiceEntry(_ entry: SnapshotServiceEntry) -> SnapshotServiceEntry {
+        var copy = entry
+        copy.programCommand = CommandArgumentRedactor.redactCommandLine(copy.programCommand)
+        return copy
+    }
+
+    private static func redactListenerEntry(_ entry: SnapshotListenerEntry) -> SnapshotListenerEntry {
+        var copy = entry
+        copy.programCommand = CommandArgumentRedactor.redactCommandLine(copy.programCommand)
+        copy.invocationIdentity = redactInvocationIdentity(copy.invocationIdentity)
+        return copy
+    }
+
+    private static func redactOrphanEntry(_ entry: SnapshotOrphanEntry) -> SnapshotOrphanEntry {
+        var copy = entry
+        copy.programCommand = CommandArgumentRedactor.redactCommandLine(copy.programCommand)
+        copy.invocationIdentity = redactInvocationIdentity(copy.invocationIdentity)
+        return copy
+    }
+
+    private static func redactInvocationIdentity(_ raw: String) -> String {
+        if let markerRange = raw.range(of: "::inline:") {
+            let prefix = String(raw[..<markerRange.lowerBound])
+            let inlineBody = String(raw[markerRange.upperBound...])
+            return "\(prefix)::inline:\(CommandArgumentRedactor.redactCommandLine(inlineBody))"
+        }
+        return CommandArgumentRedactor.redactCommandLine(raw)
+    }
+
+    private static func formatSnapshotDiffText(
+        _ diff: SessionSnapshotDiff,
+        vocabulary v: SnapshotCLIVocabulary
+    ) -> String {
+        var lines: [String] = []
+
+        // 1. Services section (count line + added + removed + modified)
+        lines.append("\(v.servicesHeader): +\(diff.summary.servicesAdded) \(v.addedWord), -\(diff.summary.servicesRemoved) \(v.removedWord), ~\(diff.summary.servicesModified) \(v.modifiedWord)")
+        for entry in diff.services.added {
+            lines.append(formatServiceDiffLine(sign: "+", entry: entry, vocabulary: v))
+        }
+        for entry in diff.services.removed {
+            lines.append(formatServiceDiffLine(sign: "-", entry: entry, vocabulary: v))
+        }
+        for mod in diff.services.modified {
+            let beforeProg = singleLine(CommandArgumentRedactor.redactCommandLine(mod.before.programCommand))
+            let afterProg = singleLine(CommandArgumentRedactor.redactCommandLine(mod.after.programCommand))
+            let progDisplay = (beforeProg == afterProg) ? afterProg : "\(beforeProg) -> \(afterProg)"
+            let reasonsDisplay = mod.reasons.map { v.reasonName($0) }.joined(separator: ",")
+            let suffix = reasonsDisplay.isEmpty ? "" : " [\(reasonsDisplay)]"
+            lines.append("  ~ [\(v.domainName(mod.after.domainScope))] \(singleLine(mod.after.label)) | \(v.plistField): \(singleLine(mod.after.plistPath)) | \(v.programField): \(progDisplay)\(suffix)")
+        }
+
+        // 2. Listening Ports section (count line + added + removed)
+        lines.append("\(v.listenersHeader): +\(diff.summary.listenersAdded) \(v.addedWord), -\(diff.summary.listenersRemoved) \(v.removedWord)")
+        for entry in diff.listeners.added {
+            lines.append(formatListenerDiffLine(sign: "+", entry: entry, vocabulary: v))
+        }
+        for entry in diff.listeners.removed {
+            lines.append(formatListenerDiffLine(sign: "-", entry: entry, vocabulary: v))
+        }
+
+        // 3. Orphan Processes section (count line + added + removed)
+        lines.append("\(v.orphansHeader): +\(diff.summary.orphansAdded) \(v.addedWord), -\(diff.summary.orphansRemoved) \(v.removedWord)")
+        for entry in diff.orphans.added {
+            lines.append(formatOrphanDiffLine(sign: "+", entry: entry, vocabulary: v))
+        }
+        for entry in diff.orphans.removed {
+            lines.append(formatOrphanDiffLine(sign: "-", entry: entry, vocabulary: v))
+        }
+
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private static func formatServiceDiffLine(
+        sign: String,
+        entry: SnapshotServiceEntry,
+        vocabulary v: SnapshotCLIVocabulary
+    ) -> String {
+        let program = singleLine(CommandArgumentRedactor.redactCommandLine(entry.programCommand))
+        return "  \(sign) [\(v.domainName(entry.domainScope))] \(singleLine(entry.label)) | \(v.plistField): \(singleLine(entry.plistPath)) | \(v.programField): \(program)"
+    }
+
+    private static func formatListenerDiffLine(
+        sign: String,
+        entry: SnapshotListenerEntry,
+        vocabulary v: SnapshotCLIVocabulary
+    ) -> String {
+        let binds = entry.bindAddresses.isEmpty ? "*" : singleLine(entry.bindAddresses.joined(separator: ","))
+        let pidSegment = entry.isOrphan ? "PID \(entry.pid) [\(v.orphanTag)]" : "PID \(entry.pid)"
+        let program = singleLine(CommandArgumentRedactor.redactCommandLine(entry.programCommand))
+        return "  \(sign) :\(entry.port) | \(v.bindField): \(binds) | \(pidSegment) | \(v.programField): \(program)"
+    }
+
+    private static func formatOrphanDiffLine(
+        sign: String,
+        entry: SnapshotOrphanEntry,
+        vocabulary v: SnapshotCLIVocabulary
+    ) -> String {
+        let program = singleLine(CommandArgumentRedactor.redactCommandLine(entry.programCommand))
+        return "  \(sign) PID \(entry.pid) | \(v.startedField): \(singleLine(entry.lstart)) | \(v.programField): \(program)"
+    }
+
+    private static func singleLine(_ text: String) -> String {
+        text
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+    }
+
     private static func encodeJSONOutput<T: Encodable>(_ payload: T, exitCode: Int32) -> CLIExecutionOutput {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -567,8 +1106,8 @@ public enum CLIRunner {
     @MainActor
     private static func usageText(_ localizer: AppLocalizer) -> String {
         localizer.L(
-            "Usage: LaunchLens --cli [list|orphans|frozen|audit] [--json] [--lang en|zh] [--ledger-dir <dir>] [--agents-dir <dir>]\n       LaunchLens --cli [freeze <label>|restore <id-or-label>|repair] --confirm [--json] [--lang en|zh] [--ledger-dir <dir>] [--agents-dir <dir>]",
-            "用法：LaunchLens --cli [list|orphans|frozen|audit] [--json] [--lang en|zh] [--ledger-dir <目录>] [--agents-dir <目录>]\n      LaunchLens --cli [freeze <服务标识>|restore <记录ID或服务标识>|repair] --confirm [--json] [--lang en|zh] [--ledger-dir <目录>] [--agents-dir <目录>]"
+            "Usage: LaunchLens --cli [list|orphans|frozen|audit] [--json] [--lang en|zh] [--ledger-dir <dir>] [--agents-dir <dir>]\n       LaunchLens --cli [freeze <label>|restore <id-or-label>|repair] --confirm [--json] [--lang en|zh] [--ledger-dir <dir>] [--agents-dir <dir>]\n       LaunchLens [--cli] snapshot <file> [--lang en|zh]\n       LaunchLens [--cli] diff <before> <after> [--json] [--fail-on-added] [--lang en|zh]",
+            "用法：LaunchLens --cli [list|orphans|frozen|audit] [--json] [--lang en|zh] [--ledger-dir <目录>] [--agents-dir <目录>]\n      LaunchLens --cli [freeze <服务标识>|restore <记录ID或服务标识>|repair] --confirm [--json] [--lang en|zh] [--ledger-dir <目录>] [--agents-dir <目录>]\n      LaunchLens [--cli] snapshot <文件> [--lang en|zh]\n      LaunchLens [--cli] diff <前> <后> [--json] [--fail-on-added] [--lang en|zh]"
         )
     }
 }

@@ -137,6 +137,90 @@ public final class AppLocalizer: ObservableObject {
         }
         return nil
     }
+
+    public var snapshotVocabulary: SnapshotCLIVocabulary {
+        SnapshotCLIVocabulary(language: language)
+    }
+}
+
+public struct SnapshotCLIVocabulary: Sendable {
+    public let snapshotSavedPrefix: String
+    public let servicesHeader: String
+    public let listenersHeader: String
+    public let orphansHeader: String
+    public let addedWord: String
+    public let removedWord: String
+    public let modifiedWord: String
+    public let domainUser: String
+    public let domainGlobal: String
+    public let domainSystem: String
+    public let plistField: String
+    public let programField: String
+    public let bindField: String
+    public let orphanTag: String
+    public let startedField: String
+    public let reasonPlistContent: String
+    public let reasonProgram: String
+    public let reasonSchedule: String
+
+    public init(language: AppLanguage) {
+        switch language {
+        case .en:
+            self.snapshotSavedPrefix = "Snapshot saved to"
+            self.servicesHeader = "Services"
+            self.listenersHeader = "Listening Ports"
+            self.orphansHeader = "Orphan Processes"
+            self.addedWord = "added"
+            self.removedWord = "removed"
+            self.modifiedWord = "modified"
+            self.domainUser = "user"
+            self.domainGlobal = "global"
+            self.domainSystem = "system"
+            self.plistField = "plist"
+            self.programField = "program"
+            self.bindField = "bind"
+            self.orphanTag = "orphan"
+            self.startedField = "started"
+            self.reasonPlistContent = "plist"
+            self.reasonProgram = "program"
+            self.reasonSchedule = "schedule"
+        case .zhHans:
+            self.snapshotSavedPrefix = "已保存快照至"
+            self.servicesHeader = "后台服务"
+            self.listenersHeader = "监听端口"
+            self.orphansHeader = "孤儿进程"
+            self.addedWord = "新增"
+            self.removedWord = "删除"
+            self.modifiedWord = "修改"
+            self.domainUser = "用户"
+            self.domainGlobal = "全局"
+            self.domainSystem = "系统"
+            self.plistField = "plist"
+            self.programField = "程序"
+            self.bindField = "绑定"
+            self.orphanTag = "孤儿"
+            self.startedField = "启动"
+            self.reasonPlistContent = "配置内容"
+            self.reasonProgram = "程序"
+            self.reasonSchedule = "启动策略"
+        }
+    }
+
+    public func domainName(_ domain: SnapshotServiceDomain) -> String {
+        switch domain {
+        case .user: return domainUser
+        case .global: return domainGlobal
+        case .system: return domainSystem
+        }
+    }
+
+    public func reasonName(_ reason: SnapshotServiceChangeReason) -> String {
+        switch reason {
+        case .plistContentChanged: return reasonPlistContent
+        case .programChanged: return reasonProgram
+        case .scheduleChanged: return reasonSchedule
+        }
+    }
 }
 
 public struct LanguageTogglePill: View {
