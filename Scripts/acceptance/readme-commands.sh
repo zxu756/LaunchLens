@@ -153,6 +153,41 @@ def expected_assertion_for(cmd: str):
         return ("exact_all", ["Total Non-Apple Background RSS"])
     if cmd == "build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang zh":
         return ("exact_all", ["非 Apple 后台常驻内存总计"])
+    if " diff Tests/Fixtures/m2-snapshot-before.json Tests/Fixtures/m2-snapshot-after.json" in cmd and "--json" in cmd:
+        return (
+            "exact_all",
+            [
+                '"hasAdditions" : true',
+                '"servicesAdded" : 1',
+                '"listenersAdded" : 1',
+                '"orphansAdded" : 1',
+                "--token=*** API_KEY=***",
+            ],
+        )
+    if " diff Tests/Fixtures/m2-snapshot-before.json Tests/Fixtures/m2-snapshot-after.json" in cmd and "--lang en" in cmd:
+        return (
+            "exact_all",
+            [
+                "Services: +1 added, -0 removed, ~0 modified",
+                "com.example.relay-worker",
+                "Listening Ports: +1 added, -0 removed",
+                ":18765 | bind: 127.0.0.1 | PID 6200 [orphan]",
+                "Orphan Processes: +1 added, -0 removed",
+                "--token=*** API_KEY=***",
+            ],
+        )
+    if " diff Tests/Fixtures/m2-snapshot-before.json Tests/Fixtures/m2-snapshot-after.json" in cmd and "--lang zh" in cmd:
+        return (
+            "exact_all",
+            [
+                "后台服务: +1 新增, -0 删除, ~0 修改",
+                "com.example.relay-worker",
+                "监听端口: +1 新增, -0 删除",
+                ":18765 | 绑定: 127.0.0.1 | PID 6200 [孤儿]",
+                "孤儿进程: +1 新增, -0 删除",
+                "--token=*** API_KEY=***",
+            ],
+        )
     return None
 
 executed_count = 0

@@ -1,0 +1,30 @@
+{
+  "capturedAt" : "2026-11-21T08:00:00Z",
+  "host" : {
+    "architecture" : "arm64",
+    "hostname" : "dev-mac.local",
+    "osVersion" : "Version 15.1 (Build 24B83)",
+    "uid" : 501
+  },
+  "listeners" : [
+
+  ],
+  "orphans" : [
+
+  ],
+  "schemaVersion" : 1,
+  "services" : [
+    {
+      "domainScope" : "global",
+      "isExternalPlist" : false,
+      "keepAlive" : true,
+      "label" : "io.example.sync-helper",
+      "lastExitStatus" : 0,
+      "pid" : 1410,
+      "plistPath" : "/Library/LaunchAgents/io.example.sync-helper.plist",
+      "plistSHA256" : "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "programCommand" : "/opt/example/bin/sync-helper --daemon",
+      "runAtLoad" : true
+    }
+  ]
+}

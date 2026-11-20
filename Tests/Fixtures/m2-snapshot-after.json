@@ -1,0 +1,69 @@
+{
+  "capturedAt" : "2026-11-21T08:05:00Z",
+  "host" : {
+    "architecture" : "arm64",
+    "hostname" : "dev-mac.local",
+    "osVersion" : "Version 15.1 (Build 24B83)",
+    "uid" : 501
+  },
+  "listeners" : [
+    {
+      "bindAddresses" : [
+        "127.0.0.1"
+      ],
+      "etimeSeconds" : 48,
+      "executable" : "/usr/bin/python3",
+      "invocationIdentity" : "/usr/bin/python3::script:/opt/example/mcp_server.py",
+      "isOrphan" : true,
+      "lstart" : "Sat Nov 21 08:04:12 2026",
+      "pid" : 6200,
+      "port" : 18765,
+      "ppid" : 1,
+      "programCommand" : "/usr/bin/python3 /opt/example/mcp_server.py --port 18765",
+      "protocols" : [
+        "TCP4"
+      ],
+      "uid" : 501
+    }
+  ],
+  "orphans" : [
+    {
+      "etimeSeconds" : 48,
+      "executable" : "/usr/bin/python3",
+      "invocationIdentity" : "/usr/bin/python3::script:/opt/example/orphan_worker.py",
+      "lstart" : "Sat Nov 21 08:04:12 2026",
+      "pid" : 6205,
+      "ppid" : 1,
+      "programCommand" : "/usr/bin/python3 /opt/example/orphan_worker.py --token=*** API_KEY=***",
+      "rssBytes" : 8388608,
+      "uid" : 501
+    }
+  ],
+  "schemaVersion" : 1,
+  "services" : [
+    {
+      "domainScope" : "user",
+      "isExternalPlist" : true,
+      "keepAlive" : false,
+      "label" : "com.example.relay-worker",
+      "lastExitStatus" : 0,
+      "pid" : 6190,
+      "plistPath" : "/private/tmp/agent-demo/com.example.relay-worker.plist",
+      "plistSHA256" : "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+      "programCommand" : "/bin/sleep 300",
+      "runAtLoad" : true
+    },
+    {
+      "domainScope" : "global",
+      "isExternalPlist" : false,
+      "keepAlive" : true,
+      "label" : "io.example.sync-helper",
+      "lastExitStatus" : 0,
+      "pid" : 1920,
+      "plistPath" : "/Library/LaunchAgents/io.example.sync-helper.plist",
+      "plistSHA256" : "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "programCommand" : "/opt/example/bin/sync-helper --daemon",
+      "runAtLoad" : true
+    }
+  ]
+}

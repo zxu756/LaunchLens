@@ -44,10 +44,10 @@ Verified read-only on an Apple Silicon Mac (`2026-11-15`, zero private service l
 - **Listening TCP Port Parity & Excluded-Listener Breakdown**: **100%** set match against `lsof -nP -iTCP -sTCP:LISTEN` across all **24** host listening PIDs (**36** unique ports): **5** tracked listener PIDs (**5** ports: **2** steady-state service ports + **1** pre-existing `PPID == 1` Python orphan + **2** injected orphan probes), **19** excluded listener PIDs with explicit reasons (**3** Apple system processes, **2** GUI `.app` bundles, **13** active `PPID > 1` session children, **1** injected `PPID > 1` negative-control worker, **0** other-UID listeners), and **0** unaccounted listeners.
 - **Orphan Precision**: **2 / 2** controlled detached `PPID == 1` TCP listeners (`node` + framework `python3`) plus **1** pre-existing live `PPID == 1` Python orphan detected with exact ports (**49.41 MB** total orphan RSS -> **130.86 MB** combined non-Apple RSS during probe window), **0** false positives on a live-parent (`PPID > 1`) `node_modules` TCP worker, and **0** false positives across **87** live `.app` bundle processes.
 
-### Current Scope Limits & Planned Work (`M2`)
+### Current Scope Limits & Planned Work (`Post-M2`)
 - **Synthetic `[DEMO]` Screenshots Preserved (`No Headless GUI Launch`)**: Live numbers above are updated from real-host CLI verification (`reports/m1-ledger.txt`), while `docs/screenshot-main*.png` and `docs/screenshot-menubar*.png` remain `[DEMO]` synthetic preview renders because headless verification runs without opening GUI windows.
-- **Opt-In Live `launchd` Round-Trip (`LAUNCHLENS_REAL_LAUNCHD=1`)**: `Scripts/acceptance/m1-real-launchd.sh` (temporary random-suffix `.plist` freeze, restore, and mid-freeze `SIGKILL` recovery) is **OFF by default** so automated test runs never execute `bootstrap`/`bootout` on the host's live `launchd`. It was run once, on 2026-11-17, on one machine with `LAUNCHLENS_REAL_LAUNCHD=1`, and exited `0`: a temporary user LaunchAgent (`/bin/sleep 300`) was loaded, frozen and restored (plist byte-identical), and `repair` after a `SIGKILL` at each of two interruption points (`afterBootout`, `afterRemoveOriginalPlist`) passed; the 9 existing user LaunchAgents on that machine were unchanged in content and modification time and nothing was left behind. Scope: one machine, one user-level LaunchAgent, one run. `Scripts/test.sh milestone 1` still counts this row as skipped.
-- **Planned (`M2`)**: Session attribution for leftover coding-agent MCP processes, read-only port/service query MCP tools, and historical RSS integration via ChronoMac.
+- **Opt-In Live `launchd` Round-Trip (`LAUNCHLENS_REAL_LAUNCHD=1`)**: `Scripts/acceptance/m1-real-launchd.sh` (temporary random-suffix `.plist` freeze, restore, and mid-freeze `SIGKILL` recovery) and `Scripts/acceptance/m2-snapshot-diff.sh` (temporary-directory `LaunchAgent`, `127.0.0.1` listener, and `PPID == 1` orphan residue detection + cleanup round-trip) are **OFF by default** so automated test runs never execute `bootstrap`/`bootout` on the host's live `launchd`. `m1-real-launchd.sh` was run once, on 2026-11-17, on one machine with `LAUNCHLENS_REAL_LAUNCHD=1`, and exited `0`: a temporary user LaunchAgent (`/bin/sleep 300`) was loaded, frozen and restored (plist byte-identical), and `repair` after a `SIGKILL` at each of two interruption points (`afterBootout`, `afterRemoveOriginalPlist`) passed; the 9 existing user LaunchAgents on that machine were unchanged in content and modification time and nothing was left behind. Scope: one machine, one user-level LaunchAgent, one run. `Scripts/test.sh milestone 1` still counts this row as skipped, and `Scripts/test.sh milestone 2` exits `2` unless `LAUNCHLENS_REAL_LAUNCHD=1` is explicitly set.
+- **Planned (Post-`M2`)**: Session attribution for leftover coding-agent MCP processes, read-only port/service query MCP tools, and historical RSS integration via ChronoMac.
 
 ## Install & Build (macOS 14.0+, Apple Silicon)
 
@@ -97,6 +97,59 @@ Omitting `--agents-dir` scans your live `~/Library/LaunchAgents`, `/Library/Laun
 # Scan live host LaunchAgents and background RSS (interactive use / release mode)
 build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang en
 build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang zh
+```
+
+## Before/After Session Snapshots (`snapshot` / `diff`, `M2`)
+
+Take a point-in-time snapshot before and after a coding-agent session, then compare the two JSON files offline to detect newly added background `launchd` services (including `.plist` definitions bootstrapped from external temporary directories), current-user `TCP LISTEN` ports (dual-stack merged by `(port, invocationIdentity)`), and non-listening `PPID == 1` orphan processes. Detached processes holding a listening port are reported once under **Listening Ports** (`[orphan]`) rather than double-counted under **Orphan Processes** (`D1`), and sensitive CLI values (`--token=...`, `API_KEY=...`, `Authorization: ...`) are redacted to `***` before writing to disk.
+
+### Subcommand Syntax
+
+Both direct subcommands and the `--cli` prefix are accepted (`D3`). `snapshot` writes atomically (`temp -> fsync -> rename`) to the path you specify without creating an internal database; `diff` reads only the two JSON files and never queries live OS state:
+
+```text
+LaunchLens [--cli] snapshot <file> [--lang en|zh]
+LaunchLens [--cli] diff <before> <after> [--json] [--fail-on-added] [--lang en|zh]
+```
+
+### Offline Fixture Replay (Verified by `Scripts/acceptance/readme-commands.sh`)
+
+```bash
+# Compare sanitized before/after session snapshots purely offline (zero host OS reads)
+build/LaunchLens.app/Contents/MacOS/LaunchLens diff Tests/Fixtures/m2-snapshot-before.json Tests/Fixtures/m2-snapshot-after.json --lang en
+build/LaunchLens.app/Contents/MacOS/LaunchLens diff Tests/Fixtures/m2-snapshot-before.json Tests/Fixtures/m2-snapshot-after.json --lang zh
+build/LaunchLens.app/Contents/MacOS/LaunchLens diff Tests/Fixtures/m2-snapshot-before.json Tests/Fixtures/m2-snapshot-after.json --json
+```
+
+Sample output (`--lang en` — note that `io.example.sync-helper` restarting from `PID 1410` to `PID 1920` produces `~0 modified`, while the external temporary `.plist`, detached listener, and redacted orphan are reported):
+
+```text
+Services: +1 added, -0 removed, ~0 modified
+  + [user] com.example.relay-worker | plist: /private/tmp/agent-demo/com.example.relay-worker.plist | program: /bin/sleep 300
+Listening Ports: +1 added, -0 removed
+  + :18765 | bind: 127.0.0.1 | PID 6200 [orphan] | program: /usr/bin/python3 /opt/example/mcp_server.py --port 18765
+Orphan Processes: +1 added, -0 removed
+  + PID 6205 | started: Sat Nov 21 08:04:12 2026 | program: /usr/bin/python3 /opt/example/orphan_worker.py --token=*** API_KEY=***
+```
+
+### Exit Codes (`snapshot` & `diff`, `D2`)
+
+| Exit Code | Subcommand | Condition |
+|---:|---|---|
+| `0` | `snapshot`, `diff` | `snapshot` captured and atomically wrote JSON; `diff` succeeded without triggering `--fail-on-added` (including zero diff, removals only, or same-key service modifications only) |
+| `1` | `snapshot`, `diff` | `launchctl`/`ps`/`lsof` returned non-zero, target path unwritable (temporary file cleaned up), missing/unreadable/corrupt JSON, or unsupported `schemaVersion` |
+| `2` | `snapshot`, `diff` | Missing or extra positional arguments, unknown flag, or invalid `--lang` |
+| `3` | `diff --fail-on-added` | `--fail-on-added` passed and at least one service, listening port, or orphan process was added (`hasAdditions == true`) |
+
+### Using with `agent-relay` (Per-Step Wrapper, `D6`)
+
+Per `M2` decision `D6`, LaunchLens does not modify the global `~/.agents/skills/agent-relay/scripts/relay.sh` script yet (direct `relay.sh` hook integration is deferred until combined with ChronoMac `mark`). Wrap each relay step externally by storing before/after snapshots inside `.relay/` (which `relay.sh` already excludes via `.git/info/exclude`):
+
+```text
+build/LaunchLens.app/Contents/MacOS/LaunchLens snapshot .relay/01-step.before.json
+~/.agents/skills/agent-relay/scripts/relay.sh codex "$WORKDIR" 01-step .relay/01-step.prompt.md
+build/LaunchLens.app/Contents/MacOS/LaunchLens snapshot .relay/01-step.after.json
+build/LaunchLens.app/Contents/MacOS/LaunchLens diff .relay/01-step.before.json .relay/01-step.after.json --fail-on-added
 ```
 
 ## Architecture & Specification

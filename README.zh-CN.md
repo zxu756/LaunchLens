@@ -44,10 +44,10 @@
 - **监听 TCP 端口一致性与排除原因明细**：对全机 `lsof -nP -iTCP -sTCP:LISTEN` 的 **24** 个监听 PID（**36** 个唯一端口）完成 **100%** 归属对账——其中 LaunchLens 追踪 **5** 个监听 PID（**5** 个端口：**2** 个常驻服务端口 + **1** 个本机既有 `PPID == 1` Python 孤儿 + **2** 个注入孤儿探针），按明确原因排除范围外监听进程 **19** 个（Apple 系统进程 **3** 个、GUI `.app` 桌面应用包 **2** 个、父进程存活 `PPID > 1` 活跃会话子进程 **13** 个、脚本注入的 `PPID > 1` 对照工作进程 **1** 个、其他 UID 进程 **0** 个），未归属监听进程 **0** 个。
 - **孤儿进程检出与零误报**：脚本临时启动的 **2 / 2** 个脱离父进程（`PPID == 1`）TCP 监听孤儿（`node` 与框架版 `python3`）及 **1** 个本机既有 `PPID == 1` Python 监听孤儿全部检出且端口精确匹配（孤儿 RSS 合计 **49.41 MB**，与服务合计 **130.86 MB**）；同时运行的父进程存活（`PPID > 1`）`node_modules` TCP 工作进程 **0** 误报，本机 **87** 个运行中 `.app` 应用进程 **0** 误报。
 
-### 当前边界与后续计划（`M2`）
+### 当前边界与后续计划（`M2` 之后）
 - **截图仍为静态演示图（无界面环境不启动 GUI 窗口）**：上文真机对账数字已按 `reports/m1-ledger.txt` 实测更新；由于无界面验收禁止弹出图形窗口，`docs/screenshot-main*.png` 与 `docs/screenshot-menubar*.png` 保留 `[DEMO]` 静态示例渲染并附明确图注。
-- **显式开关的真环境冻结回环测试（`LAUNCHLENS_REAL_LAUNCHD=1`）**：`Scripts/acceptance/m1-real-launchd.sh`（创建随机后缀临时 `.plist` 验证冻结、恢复及半截 `SIGKILL` 中断恢复）**默认关闭**，确保日常自动化测试绝不对宿主 `launchd` 执行 `bootstrap`/`bootout`。该脚本于 2026-11-17 在一台机器上用 `LAUNCHLENS_REAL_LAUNCHD=1` 跑过一次，退出码 `0`：临时用户级启动项（`/bin/sleep 300`）的装载、冻结、恢复（plist 逐字节一致），以及在两个中断点（`afterBootout`、`afterRemoveOriginalPlist`）被 `SIGKILL` 后执行 `repair`，都通过；该机器上原有的 9 个用户启动项内容和修改时间没有变化，没有残留。范围：一台机器、一个用户级启动项、一次运行；`Scripts/test.sh milestone 1` 的汇总里这一行仍计为跳过。
-- **后续计划（`M2`）**：为残留 MCP/开发孤儿进程标注来源 Agent 会话、提供只读端口与服务查询 MCP 工具、对接 ChronoMac 读取历史内存趋势。
+- **显式开关的真环境回环测试（`LAUNCHLENS_REAL_LAUNCHD=1`）**：`Scripts/acceptance/m1-real-launchd.sh`（创建随机后缀临时 `.plist` 验证冻结、恢复及半截 `SIGKILL` 中断恢复）与 `Scripts/acceptance/m2-snapshot-diff.sh`（临时目录 `LaunchAgent`、`127.0.0.1` 随机高端口监听进程与 `PPID == 1` 孤儿进程的会话前后快照比对及清理归零验证）**默认关闭**，确保日常自动化测试绝不对宿主 `launchd` 执行 `bootstrap`/`bootout`。`m1-real-launchd.sh` 于 2026-11-17 在一台机器上用 `LAUNCHLENS_REAL_LAUNCHD=1` 跑过一次，退出码 `0`：临时用户级启动项（`/bin/sleep 300`）的装载、冻结、恢复（plist 逐字节一致），以及在两个中断点（`afterBootout`、`afterRemoveOriginalPlist`）被 `SIGKILL` 后执行 `repair`，都通过；该机器上原有的 9 个用户启动项内容和修改时间没有变化，没有残留。范围：一台机器、一个用户级启动项、一次运行；`Scripts/test.sh milestone 1` 的汇总里这一行仍计为跳过，`Scripts/test.sh milestone 2` 在未设置 `LAUNCHLENS_REAL_LAUNCHD=1` 时返回退出码 `2`。
+- **后续计划（`M2` 之后）**：为残留 MCP/开发孤儿进程标注来源 Agent 会话、提供只读端口与服务查询 MCP 工具、对接 ChronoMac 读取历史内存趋势。
 
 ## 安装与编译（macOS 14.0+，Apple Silicon）
 
@@ -99,6 +99,59 @@ build/LaunchLens.app/Contents/MacOS/LaunchLens --help --lang zh
 # 只读扫描本机真实 LaunchAgents 与后台常驻内存（交互式使用 / release 模式）
 build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang en
 build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang zh
+```
+
+## 会话前后快照（`snapshot` / `diff`，`M2`）
+
+在编码 Agent 会话开始前与结束后各拍一份快照文件，随后离线运行 `diff` 比对两份 JSON，精确报出该次会话新留下的后台 `launchd` 服务（含从临时目录 `bootstrap` 加载的外部 `.plist`）、当前用户的 `TCP LISTEN` 监听端口（同端口 IPv4/IPv6 双栈按 `(端口, 程序身份)` 合并）以及不监听端口的 `PPID == 1` 孤儿进程。持有监听端口的脱离父进程仅列在「监听端口」并标 `[孤儿]`，不在「孤儿进程」中重复计数（`D1`）；命令行参数中形如 `--token=...`、`API_KEY=...`、`Authorization: ...` 的敏感值在落盘前统一打码为 `***`。
+
+### 命令语法
+
+直接调用子命令与带 `--cli` 前缀均识别（`D3`）。`snapshot` 采用同目录临时文件 + `fsync` + `rename` 原子写入用户指定路径，不建内部数据库、不自动攒历史；`diff` 只读两份 JSON 快照文件，不访问实时系统状态：
+
+```text
+LaunchLens [--cli] snapshot <文件> [--lang en|zh]
+LaunchLens [--cli] diff <前> <后> [--json] [--fail-on-added] [--lang en|zh]
+```
+
+### 离线固定样本回放（由 `Scripts/acceptance/readme-commands.sh` 自动回放断言）
+
+```bash
+# 使用仓库内脱敏固定快照样本离线验证 diff（不读取任何本机实时状态）
+build/LaunchLens.app/Contents/MacOS/LaunchLens diff Tests/Fixtures/m2-snapshot-before.json Tests/Fixtures/m2-snapshot-after.json --lang en
+build/LaunchLens.app/Contents/MacOS/LaunchLens diff Tests/Fixtures/m2-snapshot-before.json Tests/Fixtures/m2-snapshot-after.json --lang zh
+build/LaunchLens.app/Contents/MacOS/LaunchLens diff Tests/Fixtures/m2-snapshot-before.json Tests/Fixtures/m2-snapshot-after.json --json
+```
+
+输出样例（`--lang zh`——其中 `io.example.sync-helper` 重启换 PID `1410 -> 1920` 记为 `~0 修改`，外部临时目录 `.plist`、监听孤儿与打码后的孤儿进程各自报 `+1`）：
+
+```text
+后台服务: +1 新增, -0 删除, ~0 修改
+  + [用户] com.example.relay-worker | plist: /private/tmp/agent-demo/com.example.relay-worker.plist | 程序: /bin/sleep 300
+监听端口: +1 新增, -0 删除
+  + :18765 | 绑定: 127.0.0.1 | PID 6200 [孤儿] | 程序: /usr/bin/python3 /opt/example/mcp_server.py --port 18765
+孤儿进程: +1 新增, -0 删除
+  + PID 6205 | 启动: Sat Nov 21 08:04:12 2026 | 程序: /usr/bin/python3 /opt/example/orphan_worker.py --token=*** API_KEY=***
+```
+
+### 退出码约定（`snapshot` 与 `diff`，`D2`）
+
+| 退出码 | 适用命令 | 触发条件 |
+|---:|---|---|
+| `0` | `snapshot`、`diff` | `snapshot` 采集并原子写盘成功；`diff` 比较成功且未触发 `--fail-on-added`（含 0 差异、仅有删除或仅有同键服务修改） |
+| `1` | `snapshot`、`diff` | `launchctl`/`ps`/`lsof` 非零退出、目标路径不可写（自动清理临时文件）、快照文件不存在/损坏或 `schemaVersion` 不兼容 |
+| `2` | `snapshot`、`diff` | 缺少或多传位置参数、未知选项、非法 `--lang` |
+| `3` | `diff --fail-on-added` | 显式传入 `--fail-on-added` 且后台服务、监听端口或孤儿进程至少有一类存在新增（`hasAdditions == true`） |
+
+### 与 `agent-relay` 配合使用（每一棒前后各拍一次，`D6`）
+
+按已定事项 `D6`，`M2` 不直接修改全局 `~/.agents/skills/agent-relay/scripts/relay.sh`（待后续与 ChronoMac 的 `mark` 一起统一接入）。当前可在每一棒前后从外层各拍一次快照并存入 `.relay/`（`relay.sh` 已将 `.relay/` 写入 `.git/info/exclude`，不污染目标仓库工作树）：
+
+```text
+build/LaunchLens.app/Contents/MacOS/LaunchLens snapshot .relay/01-step.before.json
+~/.agents/skills/agent-relay/scripts/relay.sh codex "$WORKDIR" 01-step .relay/01-step.prompt.md
+build/LaunchLens.app/Contents/MacOS/LaunchLens snapshot .relay/01-step.after.json
+build/LaunchLens.app/Contents/MacOS/LaunchLens diff .relay/01-step.before.json .relay/01-step.after.json --fail-on-added
 ```
 
 ## 架构与设计规范
