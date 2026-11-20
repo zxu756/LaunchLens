@@ -20,8 +20,14 @@ map_scope_filter() {
         Freeze|freeze|FreezeLedgerTests)
             echo "FreezeLedgerTests"
             ;;
-        Scanner|scanner|ScannerCorrelationTests)
+        Scanner|scanner)
+            echo "ScannerCorrelationTests|SessionSnapshotTests"
+            ;;
+        ScannerCorrelationTests)
             echo "ScannerCorrelationTests"
+            ;;
+        Snapshot|snapshot|SessionSnapshot|SessionSnapshotTests)
+            echo "SessionSnapshotTests"
             ;;
         CLI|cli|CLIRunnerTests)
             echo "CLIRunnerTests"
@@ -143,7 +149,7 @@ case "$MODE" in
                 trap 'rm -rf "$SUMMARY_TMP"' EXIT
                 swift build --product LaunchLens >/dev/null
                 echo "==> [M0] Running all M0 unit test scopes (Freeze, Scanner, CLI, UI)..."
-                swift test --no-parallel --filter "FreezeLedgerTests|ScannerCorrelationTests|CLIRunnerTests|UIAndLocalizationTests" 2>&1 | tee "$SUMMARY_TMP/unit.log"
+                swift test --no-parallel --filter "FreezeLedgerTests|ScannerCorrelationTests|SessionSnapshotTests|CLIRunnerTests|UIAndLocalizationTests" 2>&1 | tee "$SUMMARY_TMP/unit.log"
                 echo "==> [M0] Running Scripts/acceptance/m0-acceptance.sh..."
                 "$ROOT/Scripts/acceptance/m0-acceptance.sh" "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}" 2>&1 | tee "$SUMMARY_TMP/accept.log"
                 echo "==> [M0] Running Scripts/acceptance/readme-commands.sh (milestone 0 isolated mode)..."
@@ -155,7 +161,7 @@ case "$MODE" in
                 trap 'rm -rf "$SUMMARY_TMP"' EXIT
                 swift build --product LaunchLens >/dev/null
                 echo "==> [M1] Running all unit test scopes (Freeze, Scanner, CLI, UI)..."
-                swift test --no-parallel --filter "FreezeLedgerTests|ScannerCorrelationTests|CLIRunnerTests|UIAndLocalizationTests" 2>&1 | tee "$SUMMARY_TMP/unit.log"
+                swift test --no-parallel --filter "FreezeLedgerTests|ScannerCorrelationTests|SessionSnapshotTests|CLIRunnerTests|UIAndLocalizationTests" 2>&1 | tee "$SUMMARY_TMP/unit.log"
                 echo "==> [M1] Running Scripts/acceptance/m1-ledger.sh..."
                 "$ROOT/Scripts/acceptance/m1-ledger.sh" "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}" 2>&1 | tee "$SUMMARY_TMP/m1.log"
                 echo "==> [M1] Running Scripts/acceptance/readme-commands.sh (isolated mode)..."
