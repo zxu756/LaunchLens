@@ -1,7 +1,6 @@
 import Foundation
 
 public enum SnapshotServiceChangeReason: String, Codable, CaseIterable, Equatable, Sendable {
-    case plistPathChanged
     case plistContentChanged
     case programChanged
     case scheduleChanged
@@ -183,10 +182,6 @@ public enum SessionSnapshotDiffer {
         return "\(entry.domainScope.rawValue)::\(entry.label)::\(canonicalPlist)"
     }
 
-    private static func serviceSlotKey(_ entry: SnapshotServiceEntry) -> String {
-        "\(entry.domainScope.rawValue)::\(entry.label)"
-    }
-
     private static func diffServices(
         before: [SnapshotServiceEntry],
         after: [SnapshotServiceEntry]
@@ -204,11 +199,12 @@ public enum SessionSnapshotDiffer {
         }
 
         let allIdentityKeys = Set(beforeByIdentity.keys).union(afterByIdentity.keys).sorted()
-        var unmatchedBefore: [SnapshotServiceEntry] = []
-        var unmatchedAfter: [SnapshotServiceEntry] = []
+        var added: [SnapshotServiceEntry] = []
+        var removed: [SnapshotServiceEntry] = []
         var modified: [SnapshotServiceModification] = []
 
-        // Pass 1: Exact `(domainScope, label, canonicalPlistPath)` matches (PID/exitStatus ignored).
+        // Match strictly by `(domainScope, label, canonicalPlistPath)` (PID/exitStatus ignored).
+        // Same label with a different canonical plistPath is two distinct keys (-1 removed, +1 added).
         for key in allIdentityKeys {
             let bList = beforeByIdentity[key] ?? []
             let aList = afterByIdentity[key] ?? []
@@ -218,42 +214,6 @@ public enum SessionSnapshotDiffer {
                 if !reasons.isEmpty {
                     modified.append(SnapshotServiceModification(before: bList[idx], after: aList[idx], reasons: reasons))
                 }
-            }
-            if bList.count > pairCount {
-                unmatchedBefore.append(contentsOf: bList[pairCount...])
-            }
-            if aList.count > pairCount {
-                unmatchedAfter.append(contentsOf: aList[pairCount...])
-            }
-        }
-
-        // Pass 2: Same `(domainScope, label)` whose `plistPath` changed -> report as `modified` rather than -1/+1.
-        var beforeBySlot: [String: [SnapshotServiceEntry]] = [:]
-        for item in unmatchedBefore {
-            beforeBySlot[serviceSlotKey(item), default: []].append(item)
-        }
-        var afterBySlot: [String: [SnapshotServiceEntry]] = [:]
-        for item in unmatchedAfter {
-            afterBySlot[serviceSlotKey(item), default: []].append(item)
-        }
-
-        var added: [SnapshotServiceEntry] = []
-        var removed: [SnapshotServiceEntry] = []
-        let allSlots = Set(beforeBySlot.keys).union(afterBySlot.keys).sorted()
-
-        for slot in allSlots {
-            let bList = (beforeBySlot[slot] ?? []).sorted(by: SnapshotServiceEntry.isDeterministicBefore)
-            let aList = (afterBySlot[slot] ?? []).sorted(by: SnapshotServiceEntry.isDeterministicBefore)
-            let pairCount = min(bList.count, aList.count)
-            for idx in 0..<pairCount {
-                let reasons = modificationReasons(before: bList[idx], after: aList[idx])
-                modified.append(
-                    SnapshotServiceModification(
-                        before: bList[idx],
-                        after: aList[idx],
-                        reasons: reasons.isEmpty ? [.plistPathChanged] : reasons
-                    )
-                )
             }
             if bList.count > pairCount {
                 removed.append(contentsOf: bList[pairCount...])
@@ -277,9 +237,6 @@ public enum SessionSnapshotDiffer {
         after: SnapshotServiceEntry
     ) -> [SnapshotServiceChangeReason] {
         var reasons: [SnapshotServiceChangeReason] = []
-        if before.plistPath != after.plistPath {
-            reasons.append(.plistPathChanged)
-        }
         if before.plistSHA256 != after.plistSHA256 {
             reasons.append(.plistContentChanged)
         }

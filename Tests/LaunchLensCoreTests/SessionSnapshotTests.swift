@@ -157,8 +157,9 @@ struct SessionSnapshotTests {
         #expect(diff.services.modified.isEmpty)
     }
 
-    @Test("M2 Row 1b: Same service label changing plist content or plist path is reported as modified")
-    func testServiceSameLabelModifiedPlistContentOrPathReportedAsModified() throws {
+    @Test("M2 Row 1b: Same service key changing plist content is modified while changed plist path is reported as removed and added")
+    func testServiceSameKeyModifiedContentVsChangedPlistPathReportedAsRemovedAndAdded() throws {
+        // Half 1: Identical (domainScope, label, canonicalPlistPath) with changed sha256/program -> modified
         let beforeContentSvc = SnapshotServiceEntry(
             domainScope: .user,
             label: "io.example.mutable",
@@ -180,6 +181,33 @@ struct SessionSnapshotTests {
             pid: 1250
         )
 
+        let contentBefore = SessionSnapshot(
+            capturedAt: SnapshotTestFixtures.t0,
+            host: SnapshotTestFixtures.defaultHost,
+            services: [beforeContentSvc],
+            listeners: [],
+            orphans: []
+        )
+        let contentAfter = SessionSnapshot(
+            capturedAt: SnapshotTestFixtures.t1,
+            host: SnapshotTestFixtures.defaultHost,
+            services: [afterContentSvc],
+            listeners: [],
+            orphans: []
+        )
+
+        let contentDiff = SessionSnapshotDiffer.diff(before: contentBefore, after: contentAfter)
+        #expect(contentDiff.hasChanges == true)
+        #expect(contentDiff.hasModifications == true)
+        #expect(contentDiff.hasAdditions == false)
+        #expect(contentDiff.services.added.isEmpty)
+        #expect(contentDiff.services.removed.isEmpty)
+        try #require(contentDiff.services.modified.count == 1)
+        #expect(contentDiff.services.modified[0].after.label == "io.example.mutable")
+        #expect(contentDiff.services.modified[0].reasons.contains(.plistContentChanged))
+        #expect(contentDiff.services.modified[0].reasons.contains(.programChanged))
+
+        // Half 2: Same (domainScope, label) but changed plistPath -> distinct identity keys (-1 old, +1 new, 0 modified)
         let beforeRelocatedSvc = SnapshotServiceEntry(
             domainScope: .user,
             label: "io.example.relocated",
@@ -200,33 +228,33 @@ struct SessionSnapshotTests {
             keepAlive: false
         )
 
-        let before = SessionSnapshot(
+        let relocatedBefore = SessionSnapshot(
             capturedAt: SnapshotTestFixtures.t0,
             host: SnapshotTestFixtures.defaultHost,
-            services: [beforeContentSvc, beforeRelocatedSvc],
+            services: [beforeRelocatedSvc],
             listeners: [],
             orphans: []
         )
-        let after = SessionSnapshot(
+        let relocatedAfter = SessionSnapshot(
             capturedAt: SnapshotTestFixtures.t1,
             host: SnapshotTestFixtures.defaultHost,
-            services: [afterContentSvc, afterRelocatedSvc],
+            services: [afterRelocatedSvc],
             listeners: [],
             orphans: []
         )
 
-        let diff = SessionSnapshotDiffer.diff(before: before, after: after)
-        #expect(diff.hasChanges == true)
-        #expect(diff.hasModifications == true)
-        #expect(diff.hasAdditions == false)
-        #expect(diff.services.added.isEmpty)
-        #expect(diff.services.removed.isEmpty)
-        try #require(diff.services.modified.count == 2)
-        #expect(diff.services.modified[0].after.label == "io.example.mutable")
-        #expect(diff.services.modified[0].reasons.contains(.plistContentChanged))
-        #expect(diff.services.modified[0].reasons.contains(.programChanged))
-        #expect(diff.services.modified[1].after.label == "io.example.relocated")
-        #expect(diff.services.modified[1].reasons.contains(.plistPathChanged))
+        let relocatedDiff = SessionSnapshotDiffer.diff(before: relocatedBefore, after: relocatedAfter)
+        #expect(relocatedDiff.hasChanges == true)
+        #expect(relocatedDiff.hasAdditions == true)
+        #expect(relocatedDiff.hasModifications == false)
+        #expect(relocatedDiff.services.modified.isEmpty)
+        #expect(relocatedDiff.summary.servicesModified == 0)
+        #expect(relocatedDiff.summary.servicesRemoved == 1)
+        #expect(relocatedDiff.summary.servicesAdded == 1)
+        try #require(relocatedDiff.services.removed.count == 1)
+        try #require(relocatedDiff.services.added.count == 1)
+        #expect(relocatedDiff.services.removed[0].plistPath == "/Users/devuser/Library/LaunchAgents/io.example.relocated.plist")
+        #expect(relocatedDiff.services.added[0].plistPath == "/private/var/folders/xx/yy/T/io.example.relocated.plist")
     }
 
     @Test("M2 Row 1c: PID reuse with identical executable and different lstart reports removed old orphan and added new orphan")
