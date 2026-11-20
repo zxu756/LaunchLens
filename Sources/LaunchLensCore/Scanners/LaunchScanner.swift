@@ -61,7 +61,7 @@ public struct PlistMetadata: Equatable, Sendable {
 public enum LaunchScanner {
 
     // Exact executable basenames for standalone native developer / AI agent daemons (never matched by substring).
-    private static let exactDevDaemonBasenames: Set<String> = [
+    internal static let exactDevDaemonBasenames: Set<String> = [
         "codex", "claude", "opencode", "opencode-cli", "vibe",
         "ollama", "llama-server", "whisper-server", "playwright",
         "chromium", "chromedriver", "geckodriver", "workerd",
@@ -72,17 +72,17 @@ public enum LaunchScanner {
         "mariadbd", "mongod", "caddy"
     ]
 
-    private static let cliFrameworkInterpreterBundles: Set<String> = [
+    internal static let cliFrameworkInterpreterBundles: Set<String> = [
         "python.app", "python3.app", "ruby.app"
     ]
 
-    private static let genericScriptFilenames: Set<String> = [
+    internal static let genericScriptFilenames: Set<String> = [
         "index.js", "index.mjs", "index.cjs", "index.ts",
         "cli.js", "cli.mjs", "cli.cjs", "main.js", "main.py",
         "server.js", "server.py", "__main__.py", "app.py", "app.js"
     ]
 
-    private enum RuntimeFamily: String, Equatable, Sendable {
+    internal enum RuntimeFamily: String, Equatable, Sendable {
         case python
         case node
         case deno
@@ -93,13 +93,13 @@ public enum LaunchScanner {
         case java
     }
 
-    private enum RuntimeKind: Equatable, Sendable {
+    internal enum RuntimeKind: Equatable, Sendable {
         case nativeBinary
         case scriptingRuntime(RuntimeFamily)
         case shell
     }
 
-    private enum InvocationTarget: Equatable, Sendable {
+    internal enum InvocationTarget: Equatable, Sendable {
         case none
         case scriptPath(normalizedPath: String, displayName: String)
         case module(String)
@@ -142,7 +142,7 @@ public enum LaunchScanner {
         }
     }
 
-    private struct ParsedInvocation: Equatable, Sendable {
+    internal struct ParsedInvocation: Equatable, Sendable {
         var executablePath: String
         var normalizedExecutablePath: String
         var executableBasename: String
@@ -595,7 +595,7 @@ public enum LaunchScanner {
 
     // MARK: - M1 Classification & Matching Helpers (L4, L5)
 
-    private static func isAppleSystemOrGenuineAppBundle(executablePath: String) -> Bool {
+    internal static func isAppleSystemOrGenuineAppBundle(executablePath: String) -> Bool {
         let lower = executablePath.lowercased()
         if lower.hasPrefix("/system/")
             || lower.hasPrefix("/usr/libexec/")
@@ -624,7 +624,7 @@ public enum LaunchScanner {
         return appSegments.contains { !cliFrameworkInterpreterBundles.contains($0) }
     }
 
-    private static func doesProcessMatchPlistInvocation(
+    internal static func doesProcessMatchPlistInvocation(
         procInv: ParsedInvocation,
         plistInv: ParsedInvocation
     ) -> Bool {
@@ -657,7 +657,7 @@ public enum LaunchScanner {
         }
     }
 
-    private static func qualifiesAsOrphanDaemon(
+    internal static func qualifiesAsOrphanDaemon(
         procInv: ParsedInvocation,
         listeningPorts: [Int]
     ) -> Bool {
@@ -686,7 +686,7 @@ public enum LaunchScanner {
         return "\(exe) (PID \(pid))"
     }
 
-    private static func parseInvocation(
+    internal static func parseInvocation(
         command: String,
         explicitArguments: [String]?
     ) -> ParsedInvocation {
@@ -1031,7 +1031,7 @@ public enum LaunchScanner {
 
     /// Splits a `ps` command line into `(executable, remainingArguments)` while preserving spaces inside
     /// macOS `.app`, `.xpc`, `.appex`, `.framework`, `.bundle`, and `Application Support` paths.
-    private static func splitExecutableAndArgumentsString(_ command: String) -> (String, String) {
+    internal static func splitExecutableAndArgumentsString(_ command: String) -> (String, String) {
         let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return ("", "") }
 
