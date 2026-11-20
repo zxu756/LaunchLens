@@ -7,8 +7,8 @@ cd "$ROOT"
 usage() {
     cat >&2 <<'EOF'
 Usage:
-  Scripts/test.sh scope <Module...>     # e.g. Freeze | Scanner | CLI | UI
-  Scripts/test.sh milestone <0|1> [--record]
+  Scripts/test.sh scope <Module...>     # e.g. Freeze | Scanner | Snapshot | CLI | UI
+  Scripts/test.sh milestone <0|1|2> [--record]
   Scripts/test.sh release [--record]
 EOF
     exit 2
@@ -90,9 +90,9 @@ if not m:
 readme_passed = int(m.group(2))
 readme_skipped = int(m.group(3))
 
-# Note: m1_ledger already records [M1 Row 4 SKIPPED] when LAUNCHLENS_REAL_LAUNCHD!=1, so do not double-count.
-has_m1_ledger = (accept_name == "m1_ledger" or extra_name == "m1_ledger")
-standalone_real_skip = 1 if (real_status.startswith("skipped") and not has_m1_ledger) else 0
+# Note: m1_ledger and m2_snapshot_diff already record [... SKIPPED] lines when LAUNCHLENS_REAL_LAUNCHD!=1, so do not double-count.
+has_script_skip = (accept_name in ("m1_ledger", "m2_snapshot_diff") or extra_name in ("m1_ledger", "m2_snapshot_diff"))
+standalone_real_skip = 1 if (real_status.startswith("skipped") and not has_script_skip) else 0
 
 total_passed = unit_passed + accept_passed + extra_passed + readme_passed
 total_skipped = unit_skipped + accept_skipped + extra_skipped + readme_skipped + standalone_real_skip
@@ -173,8 +173,37 @@ case "$MODE" in
                 fi
                 print_stage_summary "M1" "$SUMMARY_TMP/unit.log" "m1_ledger" "$SUMMARY_TMP/m1.log" "$SUMMARY_TMP/readme.log" "$REAL_STATUS"
                 ;;
+            2|M2|m2)
+                SUMMARY_TMP="$(mktemp -d "${TMPDIR:-/tmp}/launchlens-m2-summary.XXXXXX")"
+                trap 'rm -rf "$SUMMARY_TMP"' EXIT
+                swift build --product LaunchLens >/dev/null
+                echo "==> [M2] Running all unit test scopes (Freeze, Scanner, Snapshot, CLI, UI)..."
+                swift test --no-parallel --filter "FreezeLedgerTests|ScannerCorrelationTests|SessionSnapshotTests|CLIRunnerTests|UIAndLocalizationTests" 2>&1 | tee "$SUMMARY_TMP/unit.log"
+                echo "==> [M2] Running Scripts/acceptance/m0-acceptance.sh..."
+                "$ROOT/Scripts/acceptance/m0-acceptance.sh" "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}" 2>&1 | tee "$SUMMARY_TMP/m0.log"
+                echo "==> [M2] Running Scripts/acceptance/readme-commands.sh (isolated mode)..."
+                "$ROOT/Scripts/acceptance/readme-commands.sh" --mode milestone0 "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}" 2>&1 | tee "$SUMMARY_TMP/readme.log"
+                echo "==> [M2] Running Scripts/acceptance/m2-snapshot-diff.sh..."
+                set +e
+                "$ROOT/Scripts/acceptance/m2-snapshot-diff.sh" "${RECORD_FLAG[@]+"${RECORD_FLAG[@]}"}" >"$SUMMARY_TMP/m2.log" 2>&1
+                M2_RC=$?
+                set -e
+                cat "$SUMMARY_TMP/m2.log"
+                if [[ "${LAUNCHLENS_REAL_LAUNCHD:-0}" == "1" ]]; then
+                    if [[ "$M2_RC" -ne 0 ]]; then
+                        exit "$M2_RC"
+                    fi
+                    REAL_STATUS="passed"
+                else
+                    REAL_STATUS="skipped(LAUNCHLENS_REAL_LAUNCHD!=1)"
+                fi
+                print_stage_summary "M2" "$SUMMARY_TMP/unit.log" "m0_acceptance" "$SUMMARY_TMP/m0.log" "$SUMMARY_TMP/readme.log" "$REAL_STATUS" "m2_snapshot_diff" "$SUMMARY_TMP/m2.log"
+                if [[ "$M2_RC" -ne 0 ]]; then
+                    exit "$M2_RC"
+                fi
+                ;;
             *)
-                echo "Error: Milestone '$MS' is not yet implemented (supported: 0, 1)." >&2
+                echo "Error: Milestone '$MS' is not yet implemented (supported: 0, 1, 2)." >&2
                 exit 2
                 ;;
         esac
