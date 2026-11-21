@@ -12,7 +12,7 @@
 
 **LaunchLens** 是纯 SwiftPM 构建的原生 macOS 14+ 工具（包含主账本窗口、菜单栏弹窗与无头 CLI），支持应用内 `中文 / EN` 实时切换，零第三方依赖、零 `sudo` 提权提示、零网络请求。
 
-> **版本状态说明（`v0.4.0`）：** `v0.4.0` 在 `v0.3.0`（M0「去假」里程碑：6 步可回滚 `freeze` 事务、防覆盖 `restore`、启动完整性恢复、操作前命令确认框、`--demo`、`--cli audit`、`--help` / `-h`、`--agents-dir`、`--ledger-dir`、退出码 `1`/`2`）的基础上加入 M1 里程碑：服务进程树去重 RSS 与按 `Program` 反查系统守护进程、精确文件名与目标脚本孤儿判定、命令行 `--json`、需显式传入 `--confirm` 的 `--cli freeze|restore|repair`。下文条目标注 **`v0.3.0` 起** 或 **`v0.4.0` 起**。
+> **版本状态说明（`v0.5.0`）：** `v0.5.0` 在 `v0.4.0`（`v0.3.0` M0：6 步可回滚 `freeze` 事务、防覆盖 `restore`、启动完整性恢复、操作前命令确认框、`--demo`、`--cli audit`、`--help` / `-h`、`--agents-dir`、`--ledger-dir`、退出码 `1`/`2`；以及 M1：服务进程树去重 RSS 与按 `Program` 反查系统守护进程、精确文件名与目标脚本孤儿判定、命令行 `--json`、需显式传入 `--confirm` 的 `--cli freeze|restore|repair`）的基础上加入 M2 里程碑：会话前后 `snapshot` 与离线 `diff`（`--json`、`--fail-on-added` 退出码 `3`），支持外部临时目录 `.plist` 发现、监听孤儿去重与敏感参数打码。下文条目标注 **`v0.3.0` 起**、**`v0.4.0` 起** 或 **`v0.5.0` 起**。
 >
 > **`v0.1.0` / `v0.2.0` 用户升级自检提示：** 已发布的 `v0.1.0` 与 `v0.2.0` 在冻结时先删除原 `.plist` 最后才写 `ledger.json`，且未检查 `launchctl` 退出码。升级到 `v0.2.0` 之后的构建版本后，可执行 `build/LaunchLens.app/Contents/MacOS/LaunchLens --cli audit --lang zh`（或直接打开应用），检查 `~/Library/Application Support/LaunchLens/Snapshots/` 中是否存在中断的「进行中」记录或无记录孤儿备份文件，并通过 **修复 / 恢复** 找回。
 
@@ -51,7 +51,7 @@
 
 ## 安装与编译（macOS 14.0+，Apple Silicon）
 
-### Homebrew Cask 安装（`v0.4.0`，已发布版本）
+### Homebrew Cask 安装（`v0.5.0`，已发布版本）
 
 ```bash
 brew install --cask zxu756/tap/launchlens
@@ -101,7 +101,7 @@ build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang en
 build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang zh
 ```
 
-## 会话前后快照（`snapshot` / `diff`，`M2`）
+## 会话前后快照（`snapshot` / `diff`，`M2`，`v0.5.0` 起）
 
 在编码 Agent 会话开始前与结束后各拍一份快照文件，随后离线运行 `diff` 比对两份 JSON，精确报出该次会话新留下的后台 `launchd` 服务（含从临时目录 `bootstrap` 加载的外部 `.plist`）、当前用户的 `TCP LISTEN` 监听端口（同端口 IPv4/IPv6 双栈按 `(端口, 程序身份)` 合并）以及不监听端口的 `PPID == 1` 孤儿进程。持有监听端口的脱离父进程仅列在「监听端口」并标 `[孤儿]`，不在「孤儿进程」中重复计数（`D1`）；命令行参数中形如 `--token=...`、`API_KEY=...`、`Authorization: ...` 的敏感值在落盘前统一打码为 `***`。
 

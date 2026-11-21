@@ -12,7 +12,7 @@ Developers on macOS accumulate background `LaunchAgents`, global/system `launchd
 
 **LaunchLens** is a pure-SwiftPM macOS 14+ utility (main ledger window, menu bar popover, and headless CLI) with live `中文 / EN` switching, zero third-party dependencies, zero `sudo` prompts, and zero network calls.
 
-> **Version Status (`v0.4.0`):** `v0.4.0` is `v0.3.0` (the M0 "remove the fakes" milestone: the 6-step rollback-safe `freeze` transaction, conflict-checked `restore`, startup integrity recovery, command confirmation sheet, `--demo`, `--cli audit`, `--help` / `-h`, `--agents-dir`, `--ledger-dir`, exit codes `1`/`2`) plus the M1 milestone: deduplicated service process-tree + `Program`-matched daemon RSS accounting, exact executable/script orphan detection, CLI `--json`, and `--confirm`-gated `--cli freeze|restore|repair`. Items below are marked **since v0.3.0** or **since v0.4.0**.
+> **Version Status (`v0.5.0`):** `v0.5.0` builds on `v0.4.0` (`v0.3.0` M0: the 6-step rollback-safe `freeze` transaction, conflict-checked `restore`, startup integrity recovery, command confirmation sheet, `--demo`, `--cli audit`, `--help` / `-h`, `--agents-dir`, `--ledger-dir`, exit codes `1`/`2`; plus M1: deduplicated service process-tree + `Program`-matched daemon RSS accounting, exact executable/script orphan detection, CLI `--json`, and `--confirm`-gated `--cli freeze|restore|repair`) and adds the M2 milestone: before/after session `snapshot` and offline `diff` (`--json`, `--fail-on-added` exit `3`) with external `.plist` discovery, listener-orphan deduplication, and sensitive argument redaction. Items below are marked **since v0.3.0**, **since v0.4.0**, or **since v0.5.0**.
 >
 > **Upgrade Check for `v0.1.0` / `v0.2.0` Users:** Published `v0.1.0` and `v0.2.0` deleted the active `.plist` before persisting `ledger.json` and ignored non-zero `launchctl` exit codes. After updating to a post-`v0.2.0` build, run `build/LaunchLens.app/Contents/MacOS/LaunchLens --cli audit` (or launch the app) to detect any interrupted `"inProgress"` entries or untracked `.plist` backups in `~/Library/Application Support/LaunchLens/Snapshots/` and recover them via **Repair / Recover**.
 
@@ -51,7 +51,7 @@ Verified read-only on an Apple Silicon Mac (`2026-11-15`, zero private service l
 
 ## Install & Build (macOS 14.0+, Apple Silicon)
 
-### Homebrew Cask (`v0.4.0`, published release)
+### Homebrew Cask (`v0.5.0`, published release)
 
 ```bash
 brew install --cask zxu756/tap/launchlens
@@ -99,7 +99,7 @@ build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang en
 build/LaunchLens.app/Contents/MacOS/LaunchLens --cli list --lang zh
 ```
 
-## Before/After Session Snapshots (`snapshot` / `diff`, `M2`)
+## Before/After Session Snapshots (`snapshot` / `diff`, `M2`, since `v0.5.0`)
 
 Take a point-in-time snapshot before and after a coding-agent session, then compare the two JSON files offline to detect newly added background `launchd` services (including `.plist` definitions bootstrapped from external temporary directories), current-user `TCP LISTEN` ports (dual-stack merged by `(port, invocationIdentity)`), and non-listening `PPID == 1` orphan processes. Detached processes holding a listening port are reported once under **Listening Ports** (`[orphan]`) rather than double-counted under **Orphan Processes** (`D1`), and sensitive CLI values (`--token=...`, `API_KEY=...`, `Authorization: ...`) are redacted to `***` before writing to disk.
 
